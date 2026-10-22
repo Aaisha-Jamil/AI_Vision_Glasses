@@ -1,2 +1,1 @@
 # mobile_application
-
