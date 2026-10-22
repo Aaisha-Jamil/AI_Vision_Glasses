@@ -1,0 +1,200 @@
+import 'package:flutter/material.dart';
+import '../data/demo_data.dart';
+import '../widgets/ui_helpers.dart';
+import 'audio_studio_screen.dart';
+import 'feedback_screen.dart';
+import 'login_screen.dart';
+import 'privacy_screen.dart';
+import 'saved_inputs_screen.dart';
+import 'saved_notes_screen.dart';
+
+class DashboardScreen extends StatelessWidget {
+  const DashboardScreen({
+    super.key,
+    required this.themeNotifier,
+    required this.email,
+  });
+
+  final ValueNotifier<bool> themeNotifier;
+  final String email;
+
+  Future<void> logout(BuildContext context) async {
+    final confirmed = await askConfirmation(
+      context,
+      title: 'Logout',
+      message: 'Do you want to leave the dashboard?',
+      confirmText: 'Logout',
+    );
+    if (!confirmed || !context.mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(
+          themeNotifier: themeNotifier,
+        ),
+      ),
+      (route) => false,
+    );
+  }
+
+  void openPage(BuildContext context, Widget page) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => page),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Smart Notes Hub'),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: themeNotifier,
+            builder: (context, isDark, child) {
+              return IconButton(
+                tooltip: isDark
+                    ? 'Switch to Light Mode'
+                    : 'Switch to Dark Mode',
+                onPressed: () {
+                  themeNotifier.value = !themeNotifier.value;
+                },
+                icon: Icon(
+                  isDark ? Icons.light_mode : Icons.dark_mode,
+                ),
+              );
+            },
+          ),
+          IconButton(
+            tooltip: 'Logout',
+            onPressed: () => logout(context),
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          pageHeading(
+            'Welcome to Smart Notes',
+            'Privacy Preserving Smart System for Notes Taking',
+          ),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  const CircleAvatar(
+                    radius: 26,
+                    child: Icon(Icons.person_outline, size: 30),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Current session',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(email),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'Demo mode',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          featureCard(
+            context: context,
+            icon: Icons.mic_none,
+            title: 'Multi-Input Notes Studio',
+            subtitle: 'Demo recording timer and note generation',
+            onTap: () => openPage(context, const AudioStudioScreen()),
+          ),
+          featureCard(
+            context: context,
+            icon: Icons.inventory_2_outlined,
+            title: 'Saved Inputs',
+            subtitle: 'View saved images and audio transcriptions',
+            onTap: () => openPage(context, const SavedInputsScreen()),
+          ),
+          ValueListenableBuilder<int>(
+            valueListenable: DemoData.noteCount,
+            builder: (context, count, child) {
+              return featureCard(
+                context: context,
+                icon: Icons.folder_open_outlined,
+                title: 'Saved Notes',
+                subtitle: '$count notes in this session',
+                onTap: () => openPage(context, const SavedNotesScreen()),
+              );
+            },
+          ),
+          featureCard(
+            context: context,
+            icon: Icons.privacy_tip_outlined,
+            title: 'Privacy Centre',
+            subtitle: 'Privacy options and history controls',
+            onTap: () => openPage(context, const PrivacyScreen()),
+          ),
+          featureCard(
+            context: context,
+            icon: Icons.feedback_outlined,
+            title: 'Feedback',
+            subtitle: 'Share feedback about this prototype',
+            onTap: () => openPage(context, const FeedbackScreen()),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Devices Connection',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Row(
+                    children: [
+                      Icon(Icons.bluetooth, color: Colors.teal),
+                      SizedBox(width: 10),
+                      Expanded(child: Text('Bluetooth: Demo status')),
+                      Chip(label: Text('Not connected')),
+                    ],
+                  ),
+                  const Row(
+                    children: [
+                      Icon(Icons.battery_5_bar, color: Colors.teal),
+                      SizedBox(width: 10),
+                      Expanded(child: Text('Battery: Sample display')),
+                      Text('85%'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Hardware connection and battery information '
+                    'are not implemented in this demo.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
