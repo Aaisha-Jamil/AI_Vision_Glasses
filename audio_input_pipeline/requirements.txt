@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+websockets
+faster-whisper
+sentence-transformers
+numpy
+scipy
+sounddevice
+# FLAC encoding for Storage uploads (also installed by faster-whisper)
+av
+groq
+python-dotenv
+# Postgres / Supabase (the database)
+psycopg[binary]
+psycopg-pool
+pgvector
+# Supabase Storage uploads (only used when SUPABASE_URL is set)
+httpx
