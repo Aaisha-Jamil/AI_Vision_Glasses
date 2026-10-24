@@ -35,6 +35,7 @@ class CapturedImageItem {
     required this.ocrText,
     this.option = BoardImageOption.both,
     this.diagramType = 'architecture',
+    this.capturedAtSecond,
     DateTime? capturedAt,
   }) : capturedAt = capturedAt ?? DateTime.now();
 
@@ -44,4 +45,9 @@ class CapturedImageItem {
   BoardImageOption option;
   final String diagramType;
   final DateTime capturedAt;
+
+  /// The recording second at which this image was captured during a session.
+  /// Used to interleave the image inline with the audio transcript at the
+  /// exact chronological position where it was taken.
+  final int? capturedAtSecond;
 }

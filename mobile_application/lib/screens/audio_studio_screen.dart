@@ -299,12 +299,23 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     );
 
     if (capturedItem != null && mounted) {
+      // Attach the recording second at which this image was captured so it can
+      // be interleaved inline within the transcript on the saved-inputs page.
+      final itemWithTime = CapturedImageItem(
+        id: capturedItem.id,
+        title: capturedItem.title,
+        ocrText: capturedItem.ocrText,
+        option: capturedItem.option,
+        diagramType: capturedItem.diagramType,
+        capturedAtSecond: seconds,
+        capturedAt: capturedItem.capturedAt,
+      );
       setState(() {
-        sessionCapturedImages.add(capturedItem);
+        sessionCapturedImages.add(itemWithTime);
       });
       showMessage(
         context,
-        'Board capture "${capturedItem.title}" added to workshop session (${capturedItem.option.label}).',
+        'Board capture "${itemWithTime.title}" added to workshop session (${itemWithTime.option.label}).',
       );
     }
   }
@@ -319,6 +330,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           '• Local Privacy Vault: Active\n'
           '• Frame Latency: 38ms',
       option: BoardImageOption.both,
+      capturedAtSecond: seconds,
     );
     setState(() {
       sessionCapturedImages.add(item);
@@ -505,6 +517,291 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     showMessage(context, 'Comprehensive demo notes generated and saved.');
   }
 
+  // ── Helper builders ───────────────────────────────────────────────────────
+
+  /// Renders a single transcript line — flagged (red) or clean (neutral).
+  Widget _buildTranscriptEntryWidget(
+      LectureTranscriptEntry entry, bool isDark, ThemeData theme) {
+    if (entry.isFlagged) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF381A20) : const Color(0xFFFFEBEE),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isDark ? Colors.red.shade700 : Colors.red.shade300,
+            width: 1.5,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '[${entry.timestamp}]',
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: isDark ? Colors.red.shade200 : Colors.red.shade800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.warning_amber_rounded,
+                          size: 12, color: Colors.white),
+                      SizedBox(width: 4),
+                      Text(
+                        'FLAGGED NOISE',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  entry.flagReason,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontStyle: FontStyle.italic,
+                    color: isDark ? Colors.red.shade200 : Colors.red.shade700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              entry.text,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.4,
+                fontWeight: FontWeight.w500,
+                color: isDark ? Colors.white : Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => keepFlaggedLine(entry),
+                  icon: const Icon(Icons.check, size: 14, color: Colors.teal),
+                  label: const Text('Keep',
+                      style: TextStyle(color: Colors.teal, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.teal),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: const Size(0, 32),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => editTranscriptLine(entry),
+                  icon: const Icon(Icons.edit_outlined,
+                      size: 14, color: Colors.blue),
+                  label: const Text('Edit',
+                      style: TextStyle(color: Colors.blue, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.blue),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: const Size(0, 32),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: () => deleteTranscriptLine(entry),
+                  icon: const Icon(Icons.delete_outline,
+                      size: 14, color: Colors.white),
+                  label: const Text('Delete',
+                      style: TextStyle(color: Colors.white, fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: const Size(0, 32),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    } else {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.03)
+              : const Color(0xFFF8FAFB),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                '[${entry.timestamp}]',
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                entry.text,
+                style: const TextStyle(fontSize: 13, height: 1.4),
+              ),
+            ),
+            if (!isRecording && seconds > 0)
+              IconButton(
+                icon: const Icon(Icons.edit_outlined,
+                    size: 16, color: Colors.grey),
+                tooltip: 'Edit line',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () => editTranscriptLine(entry),
+              ),
+          ],
+        ),
+      );
+    }
+  }
+
+  /// Renders a compact captured-image card inline within the transcript stream.
+  Widget _buildStudioInlineImage(
+      CapturedImageItem img, bool isDark, ThemeData theme) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.teal.withValues(alpha: 0.45),
+          width: 1.5,
+        ),
+        color: isDark
+            ? Colors.teal.withValues(alpha: 0.06)
+            : Colors.teal.withValues(alpha: 0.03),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Caption bar
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.teal.withValues(alpha: 0.12),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(10),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.camera_alt_outlined,
+                    size: 15, color: Colors.teal),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    img.title,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.teal.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    img.option.label,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ),
+                if (img.capturedAtSecond != null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? Colors.white.withValues(alpha: 0.08)
+                          : Colors.black.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      '@ ${(img.capturedAtSecond! ~/ 60).toString().padLeft(2, '0')}:${(img.capturedAtSecond! % 60).toString().padLeft(2, '0')}',
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white60 : Colors.black45,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          // Board preview
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: BoardPreviewWidget(
+              item: img,
+              compact: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     timer?.cancel();
@@ -687,7 +984,10 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ),
                   ],
                   const SizedBox(height: 14),
-                  // Line by line transcript display
+                  // ── Transcript display (with optional inline image interleaving) ──
+                  // During recording: flat list of clean lines only.
+                  // After stopping: interleave captured images inline at the
+                  // exact chronological second where each was captured.
                   if (entries.isEmpty && isRecording)
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 12),
@@ -698,177 +998,52 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                         ),
                       ),
                     )
-                  else
-                    ...entries.map((entry) {
-                      if (entry.isFlagged) {
-                        // Flagged noise line: Highlighted within red shade with Keep, Edit, Delete options
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: isDark ? const Color(0xFF381A20) : const Color(0xFFFFEBEE),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: isDark ? Colors.red.shade700 : Colors.red.shade300,
-                              width: 1.5,
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.red.withValues(alpha: 0.18),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      '[${entry.timestamp}]',
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        color: isDark ? Colors.red.shade200 : Colors.red.shade800,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.red,
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.warning_amber_rounded, size: 12, color: Colors.white),
-                                        SizedBox(width: 4),
-                                        Text(
-                                          'FLAGGED NOISE',
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  Text(
-                                    entry.flagReason,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontStyle: FontStyle.italic,
-                                      color: isDark ? Colors.red.shade200 : Colors.red.shade700,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                entry.text,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  height: 1.4,
-                                  fontWeight: FontWeight.w500,
-                                  color: isDark ? Colors.white : Colors.black87,
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              // Action options: Keep, Edit, Delete
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  OutlinedButton.icon(
-                                    onPressed: () => keepFlaggedLine(entry),
-                                    icon: const Icon(Icons.check, size: 14, color: Colors.teal),
-                                    label: const Text('Keep', style: TextStyle(color: Colors.teal, fontSize: 12)),
-                                    style: OutlinedButton.styleFrom(
-                                      side: const BorderSide(color: Colors.teal),
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                      minimumSize: const Size(0, 32),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  OutlinedButton.icon(
-                                    onPressed: () => editTranscriptLine(entry),
-                                    icon: const Icon(Icons.edit_outlined, size: 14, color: Colors.blue),
-                                    label: const Text('Edit', style: TextStyle(color: Colors.blue, fontSize: 12)),
-                                    style: OutlinedButton.styleFrom(
-                                      side: const BorderSide(color: Colors.blue),
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                      minimumSize: const Size(0, 32),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  ElevatedButton.icon(
-                                    onPressed: () => deleteTranscriptLine(entry),
-                                    icon: const Icon(Icons.delete_outline, size: 14, color: Colors.white),
-                                    label: const Text('Delete', style: TextStyle(color: Colors.white, fontSize: 12)),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.red,
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                      minimumSize: const Size(0, 32),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        );
-                      } else {
-                        // Unflagged standard line
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: isDark ? Colors.white.withValues(alpha: 0.03) : const Color(0xFFF8FAFB),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  '[${entry.timestamp}]',
-                                  style: TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                    color: theme.colorScheme.primary,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  entry.text,
-                                  style: const TextStyle(fontSize: 13, height: 1.4),
-                                ),
-                              ),
-                              if (!isRecording && seconds > 0)
-                                IconButton(
-                                  icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
-                                  tooltip: 'Edit line',
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(),
-                                  onPressed: () => editTranscriptLine(entry),
-                                ),
-                            ],
-                          ),
-                        );
+                  else ...() {
+                    // Build interleaved widgets list
+                    final List<Widget> transcriptWidgets = [];
+
+                    if (!isRecording && seconds > 0 && sessionCapturedImages.isNotEmpty) {
+                      // ── Interleaved mode (session complete) ──
+                      // Map: entry index -> images to insert AFTER that entry.
+                      // Key -1 = images before the very first line.
+                      final Map<int, List<CapturedImageItem>> imgByIdx = {};
+                      for (final img in sessionCapturedImages) {
+                        int targetIdx = -1;
+                        for (int k = 0; k < entries.length; k++) {
+                          if (entries[k].secondTrigger <= img.capturedAtSecond!) {
+                            targetIdx = k;
+                          }
+                        }
+                        imgByIdx.putIfAbsent(targetIdx, () => []).add(img);
                       }
-                    }),
+
+                      // Pre-first-line images (key -1)
+                      final preImgs = imgByIdx[-1];
+                      if (preImgs != null) {
+                        for (final img in preImgs) {
+                          transcriptWidgets.add(_buildStudioInlineImage(img, isDark, theme));
+                        }
+                      }
+
+                      for (int idx = 0; idx < entries.length; idx++) {
+                        final entry = entries[idx];
+                        transcriptWidgets.add(_buildTranscriptEntryWidget(entry, isDark, theme));
+                        final imgsHere = imgByIdx[idx];
+                        if (imgsHere != null) {
+                          for (final img in imgsHere) {
+                            transcriptWidgets.add(_buildStudioInlineImage(img, isDark, theme));
+                          }
+                        }
+                      }
+                    } else {
+                      // ── Recording / idle: plain line list ──
+                      for (final entry in entries) {
+                        transcriptWidgets.add(_buildTranscriptEntryWidget(entry, isDark, theme));
+                      }
+                    }
+
+                    return transcriptWidgets;
+                  }(),
                   if (isRecording) ...[
                     const SizedBox(height: 6),
                     Row(
@@ -941,6 +1116,34 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                         ],
                       ),
                     )
+                  // Session completed: images are already shown inline inside the
+                  // transcript above — show a compact notice instead of duplicating them.
+                  else if (!isRecording && seconds > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.teal.withValues(alpha: 0.07),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Colors.teal.withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.check_circle_outline,
+                              color: Colors.teal, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              '${sessionCapturedImages.length} board capture${sessionCapturedImages.length == 1 ? '' : 's'} '
+                              'displayed inline within the transcript above at their exact capture positions.',
+                              style: const TextStyle(fontSize: 12, color: Colors.teal),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  // Recording / idle: show individual cards so images can be removed before saving.
                   else
                     ...sessionCapturedImages.asMap().entries.map((entry) {
                       final index = entry.key;

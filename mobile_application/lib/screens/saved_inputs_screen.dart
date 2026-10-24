@@ -199,6 +199,63 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
     final hasFlagged = lines.any((l) => l.isFlagged);
 
+    // ── Build an interleaved list: transcript lines + inline image cards ──
+    // Images that have a capturedAtSecond are inserted right after the last
+    // transcript line whose secondTrigger <= capturedAtSecond.
+    // Images with capturedAtSecond before all lines (targetIndex == -1) are
+    // placed BEFORE the first line using the special key -1.
+    // Images without capturedAtSecond (legacy) are appended at the end.
+    final images = List<CapturedImageItem>.from(input.capturedImages);
+    final legacyImages = images.where((img) => img.capturedAtSecond == null).toList();
+    final timedImages = images.where((img) => img.capturedAtSecond != null).toList();
+
+    // Map: line index -> list of images to show AFTER that line.
+    // Key -1 = images to display BEFORE the very first transcript line.
+    final Map<int, List<CapturedImageItem>> imagesByLineIndex = {};
+    for (final img in timedImages) {
+      // Find the last line whose secondTrigger <= capturedAtSecond
+      int targetIndex = -1; // -1 means before all lines
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].secondTrigger <= img.capturedAtSecond!) {
+          targetIndex = i;
+        }
+      }
+      // Keep -1 for pre-first-line images; use last matching index otherwise
+      imagesByLineIndex.putIfAbsent(targetIndex, () => []).add(img);
+    }
+
+    // Build widgets list
+    final List<Widget> items = [];
+
+    // Images captured before any transcript line (key == -1)
+    final preLineImgs = imagesByLineIndex[-1];
+    if (preLineImgs != null) {
+      for (final img in preLineImgs) {
+        items.add(_buildInlineCapturedImage(img, isDark, theme));
+      }
+    }
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      items.add(
+        line.isFlagged
+            ? _buildFlaggedLine(line, isDark)
+            : _buildCleanLine(line, input, isDark, theme),
+      );
+      // Insert any images captured after this line
+      final imgsHere = imagesByLineIndex[i];
+      if (imgsHere != null) {
+        for (final img in imgsHere) {
+          items.add(_buildInlineCapturedImage(img, isDark, theme));
+        }
+      }
+    }
+
+    // Append legacy images (no capturedAtSecond) at the end
+    for (final img in legacyImages) {
+      items.add(_buildInlineCapturedImage(img, isDark, theme));
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -208,7 +265,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             Icon(Icons.mic, size: 16, color: Colors.teal),
             SizedBox(width: 6),
             Text(
-              'Lecture Audio Transcripts',
+              'Lecture Audio Transcripts & Board Captures',
               style:
                   TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
             ),
@@ -241,12 +298,107 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           ),
           const SizedBox(height: 8),
         ],
-        // All lines – flagged and unflagged
-        ...lines.map((line) => line.isFlagged
-            ? _buildFlaggedLine(line, isDark)
-            : _buildCleanLine(line, input, isDark, theme)),
+        // Interleaved transcript lines and inline image cards
+        ...items,
         const SizedBox(height: 8),
       ],
+    );
+  }
+
+  /// Inline image card displayed within the transcript stream.
+  Widget _buildInlineCapturedImage(
+      CapturedImageItem img, bool isDark, ThemeData theme) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.teal.withValues(alpha: 0.45),
+          width: 1.5,
+        ),
+        color: isDark
+            ? Colors.teal.withValues(alpha: 0.06)
+            : Colors.teal.withValues(alpha: 0.03),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Caption bar
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.teal.withValues(alpha: 0.12),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(10),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.camera_alt_outlined,
+                    size: 15, color: Colors.teal),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    img.title,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.teal.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    img.option.label,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ),
+                if (img.capturedAtSecond != null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? Colors.white.withValues(alpha: 0.08)
+                          : Colors.black.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      '@ ${(img.capturedAtSecond! ~/ 60).toString().padLeft(2, '0')}:${(img.capturedAtSecond! % 60).toString().padLeft(2, '0')}',
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white60 : Colors.black45,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          // Board preview
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: BoardPreviewWidget(
+              item: img,
+              compact: true,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -673,76 +825,10 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
                     // ── Workshop Session ──
                     if (isWorkshop) ...[
-                      // Full transcript with management (all lines)
+                      // Transcript with board images interleaved inline
+                      // at the exact positions where they were captured.
                       _buildTranscriptSection(
                           context, input, isDark, theme),
-
-                      // Captured images
-                      if (input.capturedImages.isNotEmpty) ...[
-                        Row(
-                          children: [
-                            const Icon(Icons.photo_library_outlined,
-                                size: 16, color: Colors.teal),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Captured Board Images (${input.capturedImages.length})',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 13),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ...input.capturedImages.map((img) {
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 10),
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme
-                                  .surfaceContainerHighest
-                                  .withValues(alpha: 0.25),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                  color: theme
-                                      .colorScheme.outlineVariant),
-                            ),
-                            child: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Text(
-                                      img.title,
-                                      style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 12),
-                                    ),
-                                    const Spacer(),
-                                    Chip(
-                                      label: Text(
-                                        img.option.label,
-                                        style: const TextStyle(
-                                            fontSize: 10,
-                                            fontWeight:
-                                                FontWeight.bold),
-                                      ),
-                                      padding: EdgeInsets.zero,
-                                      backgroundColor: Colors.teal
-                                          .withValues(alpha: 0.15),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 6),
-                                BoardPreviewWidget(
-                                  item: img,
-                                  compact: true,
-                                ),
-                              ],
-                            ),
-                          );
-                        }),
-                      ],
                     ] else ...[
                       // Individual non-session input
                       if (input.capturedImages.isNotEmpty) ...[
