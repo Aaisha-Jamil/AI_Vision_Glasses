@@ -112,11 +112,3 @@ Launch the desktop lecture review interface:
 python main.py
 ```
 *(or run directly via `python lecture.py`)*
-
-### Keyboard Shortcuts
-- **Enter** / **KP_Enter**: Capture slide frame (`SNAP SLIDE`)
-- **Space**: Play / Pause video playback
-- **K** / **A**: Keep slide (`[✓ KEEP]`)
-- **R**: Replace blurry capture (`[🔄 REPLACE]`)
-- **D** / **Delete**: Discard snapshot (`[🗑️ DISCARD]`)
-- **Esc**: Exit application
