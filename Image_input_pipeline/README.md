@@ -1,4 +1,4 @@
-# Privacy-Preserving Smart Glasses & Lecture Synthesis Subsystem
+# Image Input Pipeline
 
 ## Overview
 This subsystem provides the **Image Input, Visual Privacy Shielding, Slide Clarification, Review State Machine, OCR Extraction, and Cloud Persistence Layer** for the overarching lecture synthesis platform.
