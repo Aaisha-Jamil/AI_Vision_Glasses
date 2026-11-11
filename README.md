@@ -145,6 +145,7 @@ The repository unites three independently developed modules. All original core a
 | **`Image_input_pipeline/`** | **Aaisha Jamil** | Commit `8d74614`<br>(Oct 21, 2026) | - `approve_store.py`<br>- `ocr.py` | 1. **Schema Resilience**: Handled column compatibility (`timestamp`, `blurred_filepath`) to prevent HTTP 400 errors with Supabase.<br>2. **Primary Key Alignment**: Added UUID generation (`ocr_id`) for `ocr_extractions` table.<br>3. **Preservation**: All original YOLOv8, enhancement, and OCR logic remain **100% intact**. |
 | **`audio_input_pipeline/`** | **Noor-Ul-Ain** | Commit `d1cd00c`<br>(Oct 22, 2026)<br>PR `#1` / `cb545a8` | - `db.py`<br>- `main.py`<br>- `storage.py`<br>- `schema_postgres.sql` | 1. **Graceful Degradation**: Added in-memory fallback in `db.py` so the server runs even if PostgreSQL credentials are unconfigured.<br>2. **Vision Bridge**: Added `/api/v1/vision/process-snapshot` in `main.py` allowing Flutter to send images through YOLOv8 & OCR via the backend.<br>3. **Audio Fallback**: Added WAV encoding fallback in `storage.py` if PyAV/ffmpeg binary is missing.<br>4. **Schema Additions**: Added `user_id`, `notes_generated`, `expires_at`, and `raw_content` columns to `sessions` table for multi-user session management. |
 | **`mobile_application/`** | **Nawal Abid**<br>*(Later: Aaisha Jamil)* | Commit `344c9f1`<br>(Oct 22, 2026)<br>Commit `b981c4e`<br>(Oct 24, 2026) | - `lib/services/` (New)<br>- `lib/data/demo_data.dart`<br>- `lib/screens/saved_inputs_screen.dart`<br>- `lib/screens/saved_studio_session_screen.dart` (New)<br>- `lib/widgets/image_loader*.dart` (New) | 1. **Live Supabase Synchronization**: Integrated `supabase_flutter` for real-time CRUD and RLS.<br>2. **Cross-Platform Compatibility**: Added abstract image loaders to support web browser rendering (`html.ImageElement`) and native mobile/desktop rendering without crashes.<br>3. **Studio Mode View**: Added dedicated multi-modal view in Saved Inputs so users can inspect synchronized transcripts, audio, and slides just like in the recording studio.<br>4. **Automated Smoke Tests**: Added `app_smoke_test.dart` verifying Material 3 widget rendering. |
+| **Full-Stack Integration & Architecture** | **Syeda Maham Fatima** | Commit `f64ef2a`<br>(Nov 11, 2026) | - `audio_input_pipeline/main.py`<br>- `mobile_application/lib/services/`<br>- `saved_studio_session_screen.dart`<br>- `migration_session_management.sql`<br>- `test/` suite & project config | 1. **End-to-End System Integration**: Architected the cross-subsystem bridge connecting Flutter, FastAPI, YOLOv8 vision, and Whisper audio.<br>2. **Synchronized Studio Review**: Authored the full multi-modal studio screen (`saved_studio_session_screen.dart`) with synchronized timeline review.<br>3. **Cloud Service Layer**: Implemented `SupabaseService` with resilient caching and session management SQL migrations.<br>4. **Cross-Platform & QA**: Added web/desktop image loaders, automated smoke tests, and repository security (.gitignore / .env.example). |
 
 ### Summary of Changes for Teammates
 
@@ -165,6 +166,13 @@ The repository unites three independently developed modules. All original core a
 - **Supabase Integration**: `supabase_service.dart` provides live CRUD for sessions, audio chunks, and notes with RLS.
 - **Cross-Platform Support**: Added web image loaders (`image_loader.dart`) preventing crashes on Chrome and Web builds.
 - **FastAPI Client**: Added `audio_pipeline_client.dart` for WebSocket live speech streaming and camera snapshot uploads.
+
+#### 🛠️ For Syeda Maham Fatima (Full-Stack System Integration & Cloud Architecture)
+- **End-to-End Orchestration**: Connected the Flutter client, FastAPI backend, YOLOv8 vision pipeline, and audio transcription services into a cohesive, production-ready system.
+- **Synchronized Studio Review Screen**: Designed and implemented the complete multi-modal studio review experience (`saved_studio_session_screen.dart`), synchronizing audio waveforms, transcription chunks, slide snapshots, and notes.
+- **Cloud Services & Session Management**: Built the comprehensive `SupabaseService` layer with offline caching, resilience, and authored multi-user session management SQL schemas (`migration_session_management.sql`).
+- **Cross-Platform & QA**: Engineered conditional web/native image loaders (`image_loader_*.dart`), automated smoke testing suites, and project health checks.
+- **Security & Infrastructure**: Configured root `.gitignore`, environment templates (`.env.example`), consolidated dependencies (`requirements.txt`), and documentation.
 
 ---
 
@@ -308,3 +316,4 @@ flutter test
 - **Aaisha Jamil** (`@Aaisha-Jamil`): Vision & OCR Pipeline (`Image_input_pipeline`), Studio Notes integration.
 - **Noor-Ul-Ain** (`@Noor-Ul-Ain16`): Audio Input Pipeline (`audio_input_pipeline`), FastAPI backend, Semantic noise scoring.
 - **Nawal Abid** (`@NawalAbid`): Mobile Application (`mobile_application`), Flutter UI/UX architecture.
+- **Syeda Maham Fatima** (`@Syeda-Maham-fatima05`): Full-Stack System Integration, Unified FastAPI Vision/Audio Bridge, Supabase Cloud Service Architecture, Synchronized Multi-Modal Studio Review, and QA Test Suites.
