@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../data/demo_data.dart';
 import 'dashboard_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -29,11 +30,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
   void openDashboard() {
     if (!(formKey.currentState?.validate() ?? false)) return;
+    final email = emailController.text.trim();
+    DemoData.currentUserId = email;
+    DemoData.loadFromSupabase(email);
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => DashboardScreen(
           themeNotifier: widget.themeNotifier,
-          email: emailController.text.trim(),
+          email: email,
         ),
       ),
     );

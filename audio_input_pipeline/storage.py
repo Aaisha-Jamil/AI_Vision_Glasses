@@ -19,12 +19,20 @@ import os
 import time
 from pathlib import Path
 
-import av
+try:
+    import av
+except Exception as _e:
+    av = None
+
 import httpx
 import numpy as np
 from scipy.io import wavfile
+from dotenv import load_dotenv
+
+load_dotenv()
 
 log = logging.getLogger("storage")
+
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
@@ -35,25 +43,31 @@ UPLOAD_ATTEMPTS = 3
 
 def to_flac(audio: np.ndarray, sr: int) -> bytes:
     """int16 mono samples -> FLAC file bytes (PyAV/ffmpeg, installed with faster-whisper)."""
+    if av is not None:
+        try:
+            buf = io.BytesIO()
+            with av.open(buf, "w", format="flac") as out:
+                stream = out.add_stream("flac", rate=sr)
+                stream.layout = "mono"
+                frame = av.AudioFrame.from_ndarray(audio.reshape(1, -1), format="s16", layout="mono")
+                frame.sample_rate = sr
+                for packet in stream.encode(frame):
+                    out.mux(packet)
+                for packet in stream.encode(None):
+                    out.mux(packet)
+            return buf.getvalue()
+        except Exception as e:
+            log.warning("PyAV encoding failed (%s), falling back to WAV format.", e)
+
+    # Fallback: WAV bytes if PyAV is unavailable or blocked by system policies
     buf = io.BytesIO()
-    with av.open(buf, "w", format="flac") as out:
-        stream = out.add_stream("flac", rate=sr)
-        stream.layout = "mono"
-        frame = av.AudioFrame.from_ndarray(audio.reshape(1, -1), format="s16", layout="mono")
-        frame.sample_rate = sr
-        for packet in stream.encode(frame):
-            out.mux(packet)
-        for packet in stream.encode(None):
-            out.mux(packet)
+    wavfile.write(buf, sr, audio)
     return buf.getvalue()
 
 
 def _headers() -> dict:
-    headers = {"apikey": SUPABASE_SECRET_KEY, "Content-Type": "audio/flac", "x-upsert": "true"}
-    # Legacy service_role keys are JWTs and also go in Authorization. The newer
-    # sb_secret_... keys are not JWTs: they are sent only as apikey.
-    if SUPABASE_SECRET_KEY.startswith("eyJ"):
-        headers["Authorization"] = f"Bearer {SUPABASE_SECRET_KEY}"
+    headers = {"apikey": SUPABASE_SECRET_KEY, "Content-Type": "audio/flac", "x-upsert": "true",
+               "Authorization": f"Bearer {SUPABASE_SECRET_KEY}"}
     return headers
 
 
@@ -82,3 +96,50 @@ def upload_chunk(session_id: str, wav_path: str) -> str:
     sr, audio = wavfile.read(wav_path)
     data = to_flac(audio, sr)
     return upload(f"{session_id}/{Path(wav_path).stem}.flac", data)
+
+
+def delete_session_audio(session_id: str) -> bool:
+    """Deletes all audio files for a session from the private lecture-audio bucket."""
+    if not ENABLED:
+        return False
+    try:
+        # First list files in the session folder
+        list_url = f"{SUPABASE_URL}/storage/v1/object/list/{AUDIO_BUCKET}"
+        resp = httpx.post(
+            list_url,
+            json={"prefix": f"{session_id}/", "limit": 1000},
+            headers={"apikey": SUPABASE_SECRET_KEY, "Authorization": f"Bearer {SUPABASE_SECRET_KEY}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            files = resp.json()
+            prefixes = [f"{session_id}/{f['name']}" for f in files if "name" in f]
+            if prefixes:
+                del_url = f"{SUPABASE_URL}/storage/v1/object/{AUDIO_BUCKET}"
+                req = httpx.Request("DELETE", del_url, json={"prefixes": prefixes}, headers=_headers())
+                del_resp = httpx.send(req)
+                log.info("Deleted %d audio files for session %s from Supabase Storage (%d)", len(prefixes), session_id, del_resp.status_code)
+                return del_resp.status_code < 400
+        return True
+    except Exception as e:
+        log.warning("Failed to delete audio storage for session %s: %s", session_id, e)
+        return False
+
+
+def delete_snapshot_images(snapshot_ids: list[str], bucket: str = "lecture-slides") -> bool:
+    """Deletes slide snapshot image files from the lecture-slides bucket."""
+    if not ENABLED or not snapshot_ids:
+        return False
+    try:
+        prefixes = []
+        for sid in snapshot_ids:
+            prefixes.extend([f"public/{sid}.jpg", f"{sid}.jpg"])
+        del_url = f"{SUPABASE_URL}/storage/v1/object/{bucket}"
+        req = httpx.Request("DELETE", del_url, json={"prefixes": prefixes}, headers=_headers())
+        del_resp = httpx.send(req)
+        log.info("Deleted slide images from %s: %s (%d)", bucket, snapshot_ids, del_resp.status_code)
+        return del_resp.status_code < 400
+    except Exception as e:
+        log.warning("Failed to delete snapshot images: %s", e)
+        return False
+

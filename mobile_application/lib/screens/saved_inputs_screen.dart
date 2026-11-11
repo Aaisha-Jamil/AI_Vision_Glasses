@@ -6,6 +6,8 @@ import '../models/transcript_line_item.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'saved_notes_screen.dart';
+import 'saved_studio_session_screen.dart';
+import 'audio_studio_screen.dart';
 
 class SavedInputsScreen extends StatefulWidget {
   const SavedInputsScreen({super.key});
@@ -15,27 +17,62 @@ class SavedInputsScreen extends StatefulWidget {
 }
 
 class _SavedInputsScreenState extends State<SavedInputsScreen> {
-  void generateNotes(SavedInput input) {
-    final created = DemoData.generateNotesForInput(input);
+  @override
+  void initState() {
+    super.initState();
+    _loadSessions();
+  }
+
+  Future<void> _loadSessions() async {
+    await DemoData.loadFromSupabase();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> generateNotes(SavedInput input) async {
+    final note = DemoData.generateNotesForInput(input);
     setState(() {});
-    if (created) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Notes generated for "${input.title}".'),
-          action: SnackBarAction(
-            label: 'View Notes',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SavedNotesScreen()),
-              );
-            },
-          ),
-        ),
-      );
-    } else {
+
+    if (note == null) {
       showMessage(context, 'Notes were already generated for this input.');
+      return;
     }
+
+    if (!mounted) return;
+
+    // Scenario 1: Document Has Been Generated
+    // Prompt Keep or Discard, recommend discard due to limited storage,
+    // show confirmation dialog, and retain the generated document safely.
+    await showPostNoteGenerationRetentionDialog(
+      context: context,
+      session: input,
+      note: note,
+      onDone: () {
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  Future<void> discardInputsNow(SavedInput input) async {
+    final confirmed = await askConfirmation(
+      context,
+      title: 'Discard Saved Inputs?',
+      message:
+          'Are you sure you want to discard the audio recordings and board captures for "${input.title}"?\n\n'
+          'The generated document in Saved Notes will NOT be affected and remains safely stored.',
+      confirmText: 'Discard Inputs',
+    );
+    if (!mounted || !confirmed) return;
+
+    final note = DemoData.notes.where((n) => n.id == input.id).firstOrNull ??
+        DemoData.notes.where((n) => n.title == input.title).firstOrNull;
+
+    DemoData.applyRetentionDecision(
+      input,
+      discardInputs: true,
+      note: note,
+    );
+    setState(() {});
+    showMessage(context, 'Session inputs discarded from Supabase. Generated document is preserved.');
   }
 
   Future<void> deleteSession(SavedInput input) async {
@@ -68,6 +105,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
   void keepFlaggedLine(TranscriptLineItem line) {
     setState(() => line.isFlagged = false);
+    DemoData.updateTranscriptLine(line);
     showMessage(context, 'Line kept — noise flag removed.');
   }
 
@@ -167,7 +205,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           line.isFlagged = false;
         }
       });
-      showMessage(context, 'Transcript line updated.');
+      DemoData.updateTranscriptLine(line);
+      showMessage(context, 'Transcript line updated in Supabase.');
     }
     controller.dispose();
   }
@@ -182,7 +221,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     );
     if (!mounted || !confirmed) return;
     setState(() => input.transcriptLines.remove(line));
-    showMessage(context, 'Transcript line deleted.');
+    DemoData.deleteTranscriptLine(line);
+    showMessage(context, 'Transcript line deleted from Supabase.');
   }
 
   // ── Widget builders ───────────────────────────────────────────────────────
@@ -195,7 +235,27 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     if (lines.isEmpty && input.audioTranscripts.isNotEmpty) {
       return _buildPlainTranscriptFallback(context, input, theme);
     }
-    if (lines.isEmpty) return const SizedBox.shrink();
+    if (lines.isEmpty && input.capturedImages.isEmpty) return const SizedBox.shrink();
+    if (lines.isEmpty && input.capturedImages.isNotEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.photo_library_outlined, size: 16, color: Colors.teal),
+              SizedBox(width: 6),
+              Text(
+                'Captured Board Images',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...input.capturedImages
+              .map((img) => _buildInlineCapturedImage(img, isDark, theme)),
+        ],
+      );
+    }
 
     final hasFlagged = lines.any((l) => l.isFlagged);
 
@@ -428,48 +488,55 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: input.audioTranscripts.map((line) {
-              final match =
-                  RegExp(r'^\[(\d{2}:\d{2})\]\s*(.*)$').firstMatch(line);
-              if (match != null) {
-                final time = match.group(1)!;
-                final text = match.group(2)!;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 5, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.teal.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          '[$time]',
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.teal,
+            children: [
+              ...input.audioTranscripts.map((line) {
+                final match =
+                    RegExp(r'^\[(\d{2}:\d{2})\]\s*(.*)$').firstMatch(line);
+                if (match != null) {
+                  final time = match.group(1)!;
+                  final text = match.group(2)!;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.teal.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            '[$time]',
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.teal,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(text,
-                            style: const TextStyle(fontSize: 12)),
-                      ),
-                    ],
-                  ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(text,
+                              style: const TextStyle(fontSize: 12)),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(line, style: const TextStyle(fontSize: 12)),
                 );
-              }
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(line, style: const TextStyle(fontSize: 12)),
-              );
-            }).toList(),
+              }),
+              if (input.capturedImages.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ...input.capturedImages.map((img) => _buildInlineCapturedImage(
+                    img, theme.brightness == Brightness.dark, theme)),
+              ],
+            ],
           ),
         ),
         const SizedBox(height: 14),
@@ -686,6 +753,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
         title: const Text('Saved Inputs'),
         actions: [
           IconButton(
+            tooltip: 'Refresh from Supabase',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadSessions,
+          ),
+          IconButton(
             tooltip: 'View Saved Notes',
             icon: const Icon(Icons.folder_open_outlined),
             onPressed: () {
@@ -697,34 +769,106 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
+      body: RefreshIndicator(
+        onRefresh: _loadSessions,
+        child: ListView(
+          padding: const EdgeInsets.all(18),
         children: [
           pageHeading(
             'Saved Inputs & Sessions',
             'Workshop lecture sessions, audio transcripts, and board captures',
           ),
+          // Session quota banner
+          Container(
+            margin: const EdgeInsets.only(bottom: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: DemoData.canAddSession
+                  ? Colors.teal.withValues(alpha: 0.08)
+                  : Colors.red.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: DemoData.canAddSession
+                    ? Colors.teal.withValues(alpha: 0.3)
+                    : Colors.red.withValues(alpha: 0.3),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  DemoData.canAddUnfinishedSession ? Icons.storage : Icons.warning_amber_rounded,
+                  size: 20,
+                  color: DemoData.canAddUnfinishedSession ? Colors.teal : Colors.red,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Unfinished Sessions: ${DemoData.unfinishedSessionCount}/${DemoData.maxUnfinishedSessions} slots used',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: DemoData.canAddUnfinishedSession ? Colors.teal : Colors.red,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        DemoData.canAddUnfinishedSession
+                            ? 'Limited Supabase storage: up to 2 unfinished sessions can be saved to continue later.'
+                            : 'Storage limit reached! Generate notes or delete an unfinished session to free a slot.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: DemoData.canAddUnfinishedSession ? Colors.teal.shade700 : Colors.red.shade700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
           if (inputs.isEmpty)
-            const Card(
+            Card(
               child: Padding(
-                padding: EdgeInsets.all(28),
+                padding: const EdgeInsets.all(28),
                 child: Column(
                   children: [
-                    Icon(Icons.inventory_2_outlined,
-                        size: 56, color: Colors.teal),
-                    SizedBox(height: 14),
-                    Text(
-                      'No saved inputs yet',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      'Record a workshop lecture or capture board images in ' 
-                      'Multi-Input Notes Studio and save the session',
-                    
-                      textAlign: TextAlign.center,
-                    ),
+                    if (DemoData.isSyncing) ...[
+                      const CircularProgressIndicator(color: Colors.teal),
+                      const SizedBox(height: 14),
+                      const Text(
+                        'Loading sessions from Supabase…',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ] else ...[
+                      const Icon(Icons.inventory_2_outlined,
+                          size: 56, color: Colors.teal),
+                      const SizedBox(height: 14),
+                      const Text(
+                        'No saved inputs yet',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Record a workshop lecture or capture board images in '
+                        'Multi-Input Notes Studio and save the session.',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 16),
+                      FilledButton.icon(
+                        onPressed: _loadSessions,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Retry Loading Sessions'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.teal,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -825,6 +969,73 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
                     // ── Workshop Session ──
                     if (isWorkshop) ...[
+                      // Studio Summary Bar
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.teal.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                              color: Colors.teal.withValues(alpha: 0.2)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.graphic_eq,
+                                size: 16, color: Colors.teal),
+                            const SizedBox(width: 6),
+                            Text(
+                              input.audioDuration ?? '00:00',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  color: Colors.teal),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              '• ${input.transcriptLines.isNotEmpty ? input.transcriptLines.length : input.audioTranscripts.length} lines',
+                              style: const TextStyle(
+                                  fontSize: 11, color: Colors.grey),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '• ${input.capturedImages.length} images',
+                              style: const TextStyle(
+                                  fontSize: 11, color: Colors.grey),
+                            ),
+                            const Spacer(),
+                            TextButton.icon(
+                              onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        SavedStudioSessionScreen(input: input),
+                                  ),
+                                ).then((_) {
+                                  if (mounted) setState(() {});
+                                });
+                              },
+                              icon: const Icon(Icons.open_in_new,
+                                  size: 13, color: Colors.teal),
+                              label: const Text(
+                                'Studio Mode',
+                                style: TextStyle(
+                                  color: Colors.teal,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                minimumSize: const Size(0, 26),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                       // Transcript with board images interleaved inline
                       // at the exact positions where they were captured.
                       _buildTranscriptSection(
@@ -872,40 +1083,119 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         ),
                       ],
                     ),
+                    // Retention countdown badge
+                    if (input.expiresAt != null) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: (input.daysRemaining ?? 0) <= 1
+                              ? Colors.red.withValues(alpha: 0.08)
+                              : Colors.orange.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: (input.daysRemaining ?? 0) <= 1
+                                ? Colors.red.withValues(alpha: 0.3)
+                                : Colors.orange.withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.schedule,
+                              size: 14,
+                              color: (input.daysRemaining ?? 0) <= 1 ? Colors.red : Colors.orange,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              input.retentionLabel,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: (input.daysRemaining ?? 0) <= 1 ? Colors.red : Colors.orange,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     // Action buttons
-                    Row(
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: input.notesGenerated
-                                ? null
-                                : () => generateNotes(input),
-                            icon: const Icon(Icons.auto_awesome),
-                            label: Text(
-                              input.notesGenerated
-                                  ? 'Notes Already Generated'
-                                  : 'Generate Notes',
-                            ),
+                        if (!input.notesGenerated) ...[
+                          ElevatedButton.icon(
+                            onPressed: () => generateNotes(input),
+                            icon: const Icon(Icons.auto_awesome, size: 16),
+                            label: const Text('Generate Notes'),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.teal,
                               foregroundColor: Colors.white,
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 10),
+                          if (isWorkshop)
+                            FilledButton.tonalIcon(
+                              onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => AudioStudioScreen(resumedSession: input),
+                                  ),
+                                ).then((_) {
+                                  if (mounted) setState(() {});
+                                });
+                              },
+                              icon: const Icon(Icons.edit_note, size: 16),
+                              label: const Text('Reopen & Edit'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.teal.withValues(alpha: 0.18),
+                                foregroundColor: Colors.teal,
+                              ),
+                            ),
+                        ],
+                        if (input.notesGenerated && input.expiresAt != null)
+                          FilledButton.icon(
+                            onPressed: () => discardInputsNow(input),
+                            icon: const Icon(Icons.delete_sweep, size: 16),
+                            label: const Text('Discard Inputs Now'),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.red.shade700,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        if (isWorkshop)
+                          OutlinedButton.icon(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      SavedStudioSessionScreen(input: input),
+                                ),
+                              ).then((_) {
+                                if (mounted) setState(() {});
+                              });
+                            },
+                            icon: const Icon(Icons.mic, size: 16),
+                            label: const Text('Studio View'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.teal,
+                              side: BorderSide(color: Colors.teal.withValues(alpha: 0.5)),
+                            ),
+                          ),
                         OutlinedButton.icon(
                           onPressed: () => deleteSession(input),
                           icon: const Icon(Icons.delete_outline,
-                              color: Colors.red),
-                          label: Text(
-                            isWorkshop ? 'Delete Session' : 'Delete',
-                            style:
-                                const TextStyle(color: Colors.red),
+                              color: Colors.red, size: 16),
+                          label: const Text(
+                            'Delete',
+                            style: TextStyle(color: Colors.red),
                           ),
                           style: OutlinedButton.styleFrom(
-                            side:
-                                const BorderSide(color: Colors.red),
+                            side: const BorderSide(color: Colors.red),
                           ),
                         ),
                       ],
@@ -916,6 +1206,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             );
           }),
         ],
+      ),
       ),
     );
   }

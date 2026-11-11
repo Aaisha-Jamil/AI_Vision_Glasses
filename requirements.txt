@@ -1,0 +1,30 @@
+# ==============================================================================
+# AI Vision Glasses - Consolidated Project Requirements
+# ==============================================================================
+
+# --- Core Mathematics & Data Processing ---
+numpy>=1.24.0
+scipy>=1.10.0
+pillow>=10.0.0
+python-dotenv>=1.0.0
+
+# --- Audio Input Pipeline & Semantic Service ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+websockets>=12.0
+faster-whisper>=1.0.0
+sentence-transformers>=2.6.0
+sounddevice>=0.4.6
+groq>=0.5.0
+httpx>=0.27.0
+av>=11.0.0
+
+# --- Supabase PostgreSQL & pgvector Database ---
+psycopg[binary]>=3.1.18
+psycopg-pool>=3.2.1
+pgvector>=0.2.5
+
+# --- Vision, Privacy Blurring & OCR Pipeline ---
+ultralytics>=8.1.0
+opencv-python>=4.9.0.80
+easyocr>=1.7.1

@@ -8,7 +8,7 @@ import 'privacy_screen.dart';
 import 'saved_inputs_screen.dart';
 import 'saved_notes_screen.dart';
 
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
     super.key,
     required this.themeNotifier,
@@ -18,6 +18,19 @@ class DashboardScreen extends StatelessWidget {
   final ValueNotifier<bool> themeNotifier;
   final String email;
 
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  @override
+  void initState() {
+    super.initState();
+    DemoData.loadFromSupabase(widget.email).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
   Future<void> logout(BuildContext context) async {
     final confirmed = await askConfirmation(
       context,
@@ -26,10 +39,13 @@ class DashboardScreen extends StatelessWidget {
       confirmText: 'Logout',
     );
     if (!confirmed || !context.mounted) return;
+    DemoData.savedInputs.clear();
+    DemoData.notes.clear();
+    DemoData.refreshCount();
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(
         builder: (_) => LoginScreen(
-          themeNotifier: themeNotifier,
+          themeNotifier: widget.themeNotifier,
         ),
       ),
       (route) => false,
@@ -40,7 +56,9 @@ class DashboardScreen extends StatelessWidget {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => page),
-    );
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -49,15 +67,20 @@ class DashboardScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Smart Notes Hub'),
         actions: [
+          IconButton(
+            tooltip: 'Backend Server Connection',
+            icon: const Icon(Icons.router_outlined),
+            onPressed: () => showServerConfigDialog(context),
+          ),
           ValueListenableBuilder<bool>(
-            valueListenable: themeNotifier,
+            valueListenable: widget.themeNotifier,
             builder: (context, isDark, child) {
               return IconButton(
                 tooltip: isDark
                     ? 'Switch to Light Mode'
                     : 'Switch to Dark Mode',
                 onPressed: () {
-                  themeNotifier.value = !themeNotifier.value;
+                  widget.themeNotifier.value = !widget.themeNotifier.value;
                 },
                 icon: Icon(
                   isDark ? Icons.light_mode : Icons.dark_mode,
@@ -98,7 +121,7 @@ class DashboardScreen extends StatelessWidget {
                           style: TextStyle(fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 4),
-                        Text(email),
+                        Text(widget.email),
                         const SizedBox(height: 4),
                         const Text(
                           'Demo mode',

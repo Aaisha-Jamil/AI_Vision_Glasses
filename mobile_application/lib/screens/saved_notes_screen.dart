@@ -13,6 +13,17 @@ class SavedNotesScreen extends StatefulWidget {
 class _SavedNotesScreenState extends State<SavedNotesScreen> {
   void refresh() => setState(() {});
 
+  @override
+  void initState() {
+    super.initState();
+    _loadNotes();
+  }
+
+  Future<void> _loadNotes() async {
+    await DemoData.loadFromSupabase();
+    if (mounted) refresh();
+  }
+
   Future<void> editNote(DemoNote note) async {
     final titleController = TextEditingController(text: note.title);
     final contentController = TextEditingController(text: note.content);
@@ -61,9 +72,10 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
           ? 'Untitled Note'
           : titleController.text.trim();
       note.content = contentController.text;
+      await DemoData.updateNote(note);
       refresh();
       if (mounted) {
-        showMessage(context, 'Note updated in this session.');
+        showMessage(context, 'Note updated in Supabase.');
       }
     }
     titleController.dispose();
@@ -74,14 +86,15 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
     final confirmed = await askConfirmation(
       context,
       title: 'Delete Note?',
-      message: 'Delete "${note.title}" from this session?',
+      message: 'Delete "${note.title}" permanently from Supabase?',
       confirmText: 'Delete',
     );
     if (!mounted || !confirmed) return;
-    DemoData.notes.removeWhere((item) => item.id == note.id);
-    DemoData.refreshCount();
+    await DemoData.deleteNote(note.id);
     refresh();
-    showMessage(context, 'Note deleted from this session.');
+    if (mounted) {
+      showMessage(context, 'Note deleted from Supabase.');
+    }
   }
 
   Future<void> previewNote(DemoNote note) async {
@@ -113,21 +126,32 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
     showMessage(
       context,
       '$format export is not implemented yet. '
-      'Your notes remain available in this session.',
+      'Your notes remain securely stored in Supabase.',
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Saved Notes')),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
-        children: [
-          pageHeading(
-            'Your Notes',
-            'Notes are held in memory for this demo session',
+      appBar: AppBar(
+        title: const Text('Saved Notes'),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh from Supabase',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadNotes,
           ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _loadNotes,
+        child: ListView(
+          padding: const EdgeInsets.all(18),
+          children: [
+            pageHeading(
+              'Your Notes',
+              'Notes are synchronized and securely stored in Supabase',
+            ),
           if (DemoData.notes.isEmpty)
             const Card(
               child: Padding(
@@ -259,6 +283,7 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
             style: TextStyle(fontSize: 12),
           ),
         ],
+      ),
       ),
     );
   }

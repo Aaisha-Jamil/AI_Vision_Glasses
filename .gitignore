@@ -1,0 +1,112 @@
+# ==============================================================================
+# AI Vision Glasses - Root Git Ignore Configuration
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Environment Variables & Secrets
+# ------------------------------------------------------------------------------
+.env
+.env.*
+*.env
+Image_input_pipeline/.env
+audio_input_pipeline/.env
+!.env.example
+
+# ------------------------------------------------------------------------------
+# 2. Python Bytecode, Caches & Virtual Environments
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ------------------------------------------------------------------------------
+# 3. Vision & Audio Local Runtime Data & Snapshots
+# ------------------------------------------------------------------------------
+audio_input_pipeline/data/
+audio_input_pipeline/static/snapshots/
+Image_input_pipeline/runs/
+runs/
+*.log
+
+# ------------------------------------------------------------------------------
+# 4. Flutter & Dart Build Artifacts
+# ------------------------------------------------------------------------------
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+*/build/
+mobile_application/build/
+mobile_application/.dart_tool/
+mobile_application/.flutter-plugins
+mobile_application/.flutter-plugins-dependencies
+
+# Android build artifacts
+.gradle/
+**/android/.gradle/
+**/android/.kotlin/
+**/android/build/
+**/android/app/build/
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+local.properties
+
+# iOS & macOS artifacts
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/.last_build_id
+**/macos/Pods/
+**/macos/Flutter/ephemeral/
+
+# Windows / Linux artifacts
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+
+# ------------------------------------------------------------------------------
+# 5. IDE, Editor & OS Specific Files
+# ------------------------------------------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

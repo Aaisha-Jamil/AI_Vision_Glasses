@@ -3,7 +3,10 @@ import cv2
 import numpy as np
 import threading
 import json
+import uuid
+import time
 import urllib.request
+
 
 # Lazy-loaded EasyOCR reader instance to avoid heavy startup overhead
 _easyocr_reader = None
@@ -50,8 +53,8 @@ def save_ocr_to_supabase(snapshot_id, session_id, extracted_text, confidence_sco
     # 1. Insert into ocr_extractions
     ocr_endpoint = f"{url}/rest/v1/ocr_extractions"
     ocr_payload = {
+        "ocr_id": str(uuid.uuid4()),
         "snapshot_id": snapshot_id,
-        "session_id": session_id,
         "extracted_text": extracted_text,
         "confidence_score": float(confidence_score)
     }
@@ -60,8 +63,16 @@ def save_ocr_to_supabase(snapshot_id, session_id, extracted_text, confidence_sco
         req = urllib.request.Request(ocr_endpoint, data=json.dumps(ocr_payload).encode('utf-8'), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=6) as response:
             print(f"[Supabase SUCCESS]: OCR extraction for snapshot '{snapshot_id}' pushed to cloud database!")
+    except urllib.error.HTTPError as he:
+        err_msg = ""
+        try:
+            err_msg = he.read().decode('utf-8')
+        except Exception:
+            pass
+        print(f"[Database Error]: Failed to push OCR record (HTTP {he.code}: {he.reason} - {err_msg}).")
     except Exception as e:
         print(f"[Database Error]: Failed to push OCR record ({e}).")
+
 
     # 2. Patch image_snapshots note_inclusion_preference
     snap_endpoint = f"{url}/rest/v1/image_snapshots?snapshot_id=eq.{snapshot_id}"

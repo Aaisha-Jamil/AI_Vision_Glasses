@@ -14,13 +14,15 @@ load_dotenv()  # before project imports: modules read their settings at import t
 
 import asyncio
 import logging
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +33,23 @@ import db
 import semantic
 import storage
 from audio_pipeline import AudioPipeline
+
+# Bridge Image/Vision Pipeline components
+IMAGE_DIR = Path(__file__).resolve().parent.parent / "Image_input_pipeline"
+if str(IMAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(IMAGE_DIR))
+
+try:
+    from model import PrivacyModel
+    from enhance import enhance_slide
+    import ocr
+    import approve_store
+    privacy_model_instance = PrivacyModel()
+except Exception as _e:
+    privacy_model_instance = None
+    enhance_slide = None
+    ocr = None
+    approve_store = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
@@ -63,13 +82,38 @@ pipeline = AudioPipeline(broadcast=manager.broadcast)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init_db()
+    try:
+        db.init_db()
+        log.info("Supabase database connection initialized successfully.")
+    except Exception as e:
+        log.warning("Database connection failed or not configured (%s). Server starting in memory/streaming mode.", e)
     # Load the embedding model in the background so startup stays fast;
     # a session started before it finishes just waits on the model lock.
     asyncio.create_task(asyncio.to_thread(semantic.get_model))
+
+    # 7-day auto-deletion background loop: purges expired completed session inputs
+    async def _periodic_retention_cleanup():
+        while True:
+            try:
+                purged = await asyncio.to_thread(db.cleanup_expired_sessions)
+                if purged:
+                    log.info("7-day auto-cleanup purged %d expired session(s): %s", len(purged), purged)
+                    for sid in purged:
+                        await asyncio.to_thread(storage.delete_session_audio, sid)
+            except Exception as e:
+                log.warning("Periodic retention cleanup check: %s", e)
+            await asyncio.sleep(3600)
+
+    cleanup_loop_task = asyncio.create_task(_periodic_retention_cleanup())
+
     yield
+    cleanup_loop_task.cancel()
     await pipeline.stop()  # release the mic on server shutdown
-    db.close()  # Postgres connection pool
+    try:
+        db.close()  # Postgres connection pool
+    except Exception:
+        pass
+
 
 
 app = FastAPI(
@@ -95,6 +139,8 @@ class SessionStart(BaseModel):
     warmup: bool | None = None  # mic calibration; None = on for mic sources
     device: int | None = None  # server_mic device index; None = system default
     source_file: str | None = None  # testing: stream this WAV instead of the mic
+    session_id: str | None = None  # optional client-provided session id for audio/vision alignment
+    user_id: str | None = None  # owner of the session (e.g. email)
 
 
 class OverrideRequest(BaseModel):
@@ -141,6 +187,21 @@ def health():
         "noise_scoring": semantic.NOISE_SCORING,
         "database": "postgres",
         "audio_storage": "supabase" if storage.ENABLED else "local",
+        "vision_model": "yolov8_loaded" if privacy_model_instance is not None else "bypass",
+        "ocr_available": ocr is not None,
+    }
+
+
+@app.get("/api/v1/user/{user_id}/session-quota")
+async def user_session_quota(user_id: str):
+    """Enforce Scenario 2: Maximum of 2 unfinished sessions per user."""
+    unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, user_id)
+    return {
+        "user_id": user_id,
+        "unfinished_sessions": unfinished_count,
+        "max_allowed": 2,
+        "can_create_new": unfinished_count < 2,
+        "message": "Storage limit reached (2/2 unfinished sessions). Please complete or delete an existing session first." if unfinished_count >= 2 else "Quota OK",
     }
 
 
@@ -148,17 +209,55 @@ def health():
 async def session_start(body: SessionStart):
     if pipeline.running:
         raise HTTPException(409, f"session {pipeline.session_id} already active")
-    session_id = str(uuid.uuid4())
+
+    # Enforce Scenario 2: Maximum of 2 unfinished sessions per user
+    if body.user_id:
+        unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, body.user_id)
+        if unfinished_count >= 2:
+            raise HTTPException(
+                403,
+                f"Storage limit reached: You have {unfinished_count} unfinished sessions saved. "
+                "A maximum of 2 unfinished sessions is allowed due to Supabase storage limitations. "
+                "Please generate notes for an existing session or delete it before starting a new one."
+            )
+
+    session_id = body.session_id or str(uuid.uuid4())
     topic = body.seminar_topic.strip() or semantic.DEFAULT_SEMINAR_TOPIC
     seed = await asyncio.to_thread(semantic.seed_vector, topic)
-    await asyncio.to_thread(db.create_session, session_id, body.title, topic, seed)
+    await asyncio.to_thread(db.create_session, session_id, body.title, topic, seed, body.user_id)
     audio_pipeline.text_accumulator.clear()
     await pipeline.start(session_id, device=body.device, source_file=body.source_file,
                          source=body.source, warmup=body.warmup)
     await manager.broadcast({"type": "session_started", "session_id": session_id,
-                             "title": body.title, "seminar_topic": topic})
+                             "title": body.title, "seminar_topic": topic, "user_id": body.user_id})
     return {"session_id": session_id, "title": body.title, "seminar_topic": topic,
-            "status": "ACTIVE"}
+            "status": "ACTIVE", "user_id": body.user_id}
+
+
+@app.delete("/api/v1/session/{session_id}/inputs")
+async def delete_session_inputs_endpoint(session_id: str):
+    """Scenario 1: Permanently deletes session inputs from Supabase DB and Storage while preserving the generated note."""
+    success = await asyncio.to_thread(db.purge_session_inputs, session_id)
+    await asyncio.to_thread(storage.delete_session_audio, session_id)
+    return {
+        "session_id": session_id,
+        "status": "INPUTS_DISCARDED",
+        "message": "Raw audio chunks, containers, and snapshots purged from Supabase. Generated notes preserved.",
+        "success": success,
+    }
+
+
+@app.post("/api/v1/sessions/cleanup-expired")
+async def cleanup_expired_sessions_endpoint():
+    """7-day automatic deletion mechanism for completed sessions whose inputs were retained."""
+    purged_ids = await asyncio.to_thread(db.cleanup_expired_sessions)
+    for sid in purged_ids:
+        await asyncio.to_thread(storage.delete_session_audio, sid)
+    return {
+        "purged_count": len(purged_ids),
+        "purged_session_ids": purged_ids,
+        "status": "SUCCESS",
+    }
 
 
 @app.post("/api/v1/session/stop")
@@ -265,16 +364,145 @@ async def clean_transcript(session_id: str):
     }
 
 
-@app.get("/api/v1/transcript/buffer")
-def transcript_buffer():
-    """Chunks transcribed since the last flush (not yet noise-scored)."""
-    buf = audio_pipeline.text_accumulator
+
+# ==============================================================================
+# Vision & Board Snapshot REST Endpoints
+# ==============================================================================
+
+SNAPSHOTS_DIR = STATIC_DIR / "snapshots"
+SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class SnapshotPreferenceRequest(BaseModel):
+    preference: str  # IMAGE_ONLY, OCR_TEXT_ONLY, BOTH
+
+
+@app.post("/api/v1/vision/process-snapshot")
+async def process_snapshot(
+    file: UploadFile = File(...),
+    session_id: str = Form("lecture_session_01"),
+    privacy_target: str = Form("full_body"),
+    enhancement_mode: str = Form("magic_color"),
+    note_preference: str = Form("BOTH"),
+):
+    """
+    Receives an uploaded board image from mobile camera, applies YOLOv8 privacy blur,
+    enhances slide contrast, extracts OCR text, uploads to Supabase (if configured),
+    and saves locally in static/snapshots/.
+    """
+    try:
+        contents = await file.read()
+        np_arr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(400, "Invalid image data received.")
+    except Exception as e:
+        raise HTTPException(400, f"Error decoding image: {e}")
+
+    snapshot_id = f"snap_{uuid.uuid4().hex[:10]}"
+    timestamp = 0.0
+
+    # 1. Privacy Blurring (YOLOv8)
+    human_count = 0
+    human_mask = None
+    processed_frame = frame
+    if privacy_model_instance is not None:
+        try:
+            processed_frame, human_count, human_mask = privacy_model_instance.apply_privacy_blur(
+                frame, timestamp=timestamp, target_mode=privacy_target
+            )
+        except Exception as e:
+            log.warning("YOLOv8 blur failed (%s), proceeding with original frame.", e)
+            processed_frame = frame
+
+    # 2. Slide Enhancement (CamScanner-style leveling & sharpening)
+    if enhance_slide is not None:
+        try:
+            processed_frame = enhance_slide(
+                processed_frame, timestamp=timestamp, mode=enhancement_mode, human_mask=human_mask
+            )
+        except Exception as e:
+            log.warning("Enhancement failed (%s), keeping processed frame.", e)
+
+    # 3. Save locally to static/snapshots/
+    local_filename = f"{snapshot_id}.jpg"
+    local_path = SNAPSHOTS_DIR / local_filename
+    cv2.imwrite(str(local_path), processed_frame)
+    local_image_url = f"/static/snapshots/{local_filename}"
+
+    # 4. Extract OCR text
+    extracted_text = ""
+    avg_conf = 0.0
+    if ocr is not None:
+        try:
+            extracted_text, avg_conf = ocr.process_ocr_worker(
+                snapshot_id, session_id, processed_frame, human_mask, note_preference
+            )
+        except Exception as e:
+            log.warning("OCR processing failed (%s).", e)
+            extracted_text = "[No legible text extracted]"
+            avg_conf = 0.0
+    else:
+        extracted_text = "[OCR module not available]"
+
+    # 5. Save to Supabase Storage & Database (if configured)
+    if approve_store is not None:
+        try:
+            snapshot_data = {
+                "snapshot_id": snapshot_id,
+                "session_id": session_id,
+                "sequence_timestamp": timestamp,
+                "captured_timestamp": timestamp,
+                "frame": processed_frame,
+                "status": "APPROVED",
+                "note_inclusion_preference": note_preference,
+                "is_replacement": False,
+            }
+            approve_store.save_snapshot_to_supabase(snapshot_data)
+        except Exception as e:
+            log.warning("Supabase snapshot persistence failed (%s).", e)
+
+    # Broadcast event to WebSocket clients
+    await manager.broadcast({
+        "type": "snapshot_captured",
+        "snapshot_id": snapshot_id,
+        "session_id": session_id,
+        "blurred_image_url": local_image_url,
+        "extracted_text": extracted_text,
+        "people_detected": human_count,
+        "confidence_score": round(avg_conf, 2),
+    })
+
     return {
-        "session_id": pipeline.session_id,
-        "chunks": len(buf),
-        "merged_text": " ".join(c["transcript"] for c in buf),
-        "items": buf,
+        "snapshot_id": snapshot_id,
+        "session_id": session_id,
+        "blurred_image_url": local_image_url,
+        "extracted_text": extracted_text,
+        "confidence_score": round(avg_conf, 2),
+        "people_detected": human_count,
+        "note_inclusion_preference": note_preference,
+        "status": "APPROVED",
     }
+
+
+@app.patch("/api/v1/vision/snapshot/{snapshot_id}/preference")
+async def update_snapshot_preference(snapshot_id: str, body: SnapshotPreferenceRequest):
+    """Updates whether the snapshot includes IMAGE_ONLY, OCR_TEXT_ONLY, or BOTH."""
+    pref = body.preference.strip().upper()
+    if pref not in ("IMAGE_ONLY", "OCR_TEXT_ONLY", "BOTH"):
+        raise HTTPException(422, "preference must be IMAGE_ONLY, OCR_TEXT_ONLY, or BOTH")
+    if approve_store is not None and approve_store.is_supabase_configured():
+        url, key = approve_store.get_supabase_config()
+        endpoint = f"{url}/rest/v1/image_snapshots?snapshot_id=eq.{snapshot_id}"
+        headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        import urllib.request, json as _json
+        req = urllib.request.Request(endpoint, data=_json.dumps({"note_inclusion_preference": pref}).encode("utf-8"), headers=headers, method="PATCH")
+        try:
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            log.warning("Failed updating preference in Supabase: %s", e)
+    return {"snapshot_id": snapshot_id, "note_inclusion_preference": pref, "status": "UPDATED"}
 
 
 @app.websocket("/ws/transcript")
@@ -320,3 +548,16 @@ async def ws_test(websocket: WebSocket):
             await websocket.send_text(f"echo: {msg}")
     except WebSocketDisconnect:
         pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print("\n" + "=" * 65)
+    print("  AI VISION GLASSES - AUDIO BACKEND SERVER")
+    print("  Open in Browser: http://localhost:8000/")
+    print("  API Docs:        http://localhost:8000/docs")
+    print("  (Note: In Windows browsers, open localhost:8000, not 0.0.0.0)")
+    print("=" * 65 + "\n")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+

@@ -36,6 +36,11 @@ class CapturedImageItem {
     this.option = BoardImageOption.both,
     this.diagramType = 'architecture',
     this.capturedAtSecond,
+    this.localImagePath,
+    this.remoteImageUrl,
+    this.snapshotId,
+    this.confidenceScore,
+    this.peopleDetected = 0,
     DateTime? capturedAt,
   }) : capturedAt = capturedAt ?? DateTime.now();
 
@@ -47,7 +52,20 @@ class CapturedImageItem {
   final DateTime capturedAt;
 
   /// The recording second at which this image was captured during a session.
-  /// Used to interleave the image inline with the audio transcript at the
-  /// exact chronological position where it was taken.
   final int? capturedAtSecond;
+
+  /// Local file path on the device (from camera/gallery)
+  final String? localImagePath;
+
+  /// Remote processed URL (from FastAPI / Supabase)
+  final String? remoteImageUrl;
+
+  /// Database/Pipeline snapshot identifier
+  final String? snapshotId;
+
+  /// OCR confidence score (0.0 to 1.0)
+  final double? confidenceScore;
+
+  /// Number of people detected and privacy-blurred by YOLOv8
+  final int peopleDetected;
 }

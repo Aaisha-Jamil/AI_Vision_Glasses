@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
+import '../services/vision_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 
@@ -9,10 +11,12 @@ class BoardCameraScreen extends StatefulWidget {
     super.key,
     this.isSessionMode = false,
     this.sessionTitle,
+    this.sessionId,
   });
 
   final bool isSessionMode;
   final String? sessionTitle;
+  final String? sessionId;
 
   @override
   State<BoardCameraScreen> createState() => _BoardCameraScreenState();
@@ -21,7 +25,10 @@ class BoardCameraScreen extends StatefulWidget {
 class _BoardCameraScreenState extends State<BoardCameraScreen> {
   bool hasPreview = false;
   bool looksGoodClicked = false;
+  bool isProcessing = false;
+  String processingStatus = '';
   late CapturedImageItem currentItem;
+  final ImagePicker _picker = ImagePicker();
 
   @override
   void initState() {
@@ -34,14 +41,103 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
       id: DemoData.nextInputId,
       title: 'Board Capture #${DemoData.nextInputId}',
       ocrText: '• Neural Network Architecture Overview\n'
-          '• Step 1: Real-time Camera Feed (Glasses)\n'
+          '• Step 1: Real-time Camera Feed (Glasses/Mobile)\n'
           '• Step 2: YOLOv8 Face Anonymization Pipeline\n'
           '• Step 3: OCR Text Extraction & Whiteboard Analysis\n'
           '• Loss: L_privacy = λ · ||I_blur - I_orig||\n'
           '• Target Frame Latency: < 45ms\n'
-          '• Status: Encryption Verified',
+          '• Status: Encryption & Privacy Verified',
       option: BoardImageOption.both,
     );
+  }
+
+  Future<void> captureWithCamera() async {
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 92,
+      );
+      if (photo != null) {
+        await _processPickedImage(photo);
+      }
+    } catch (e) {
+      if (mounted) showMessage(context, 'Camera access error: $e');
+    }
+  }
+
+  Future<void> pickFromGallery() async {
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 92,
+      );
+      if (photo != null) {
+        await _processPickedImage(photo);
+      }
+    } catch (e) {
+      if (mounted) showMessage(context, 'Gallery access error: $e');
+    }
+  }
+
+  Future<void> _processPickedImage(XFile imageFile) async {
+    setState(() {
+      isProcessing = true;
+      processingStatus = 'Running YOLOv8 Privacy Blur & EasyOCR Extraction...';
+    });
+
+    try {
+      final effectiveSessionId = widget.sessionId ??
+          (widget.sessionTitle != null && widget.sessionTitle!.isNotEmpty
+              ? widget.sessionTitle!
+              : 'sess_${DateTime.now().millisecondsSinceEpoch}');
+      final result = await VisionService().processSnapshot(
+        imageFile,
+        sessionId: effectiveSessionId,
+      );
+
+      final newId = DemoData.nextInputId;
+      final ocrText = result['extracted_text'] as String? ?? 'No text detected';
+      final localPath = result['local_path'] as String?;
+      final remoteUrl = result['full_blurred_image_url'] as String?;
+      final snapshotId = result['snapshot_id'] as String?;
+      final conf = (result['confidence_score'] as num?)?.toDouble();
+      final peopleDetected = (result['people_detected'] as num?)?.toInt() ?? 0;
+
+      setState(() {
+        currentItem = CapturedImageItem(
+          id: newId,
+          title: 'Board Capture #$newId',
+          ocrText: ocrText,
+          option: BoardImageOption.both,
+          localImagePath: localPath,
+          remoteImageUrl: remoteUrl,
+          snapshotId: snapshotId,
+          confidenceScore: conf,
+          peopleDetected: peopleDetected,
+        );
+        hasPreview = true;
+        looksGoodClicked = false;
+        isProcessing = false;
+      });
+
+      if (mounted) {
+        showMessage(
+          context,
+          peopleDetected > 0
+              ? 'YOLOv8 Shield blurred $peopleDetected person(s). Review preview.'
+              : 'Image processed & privacy verified. Review preview.',
+        );
+      }
+    } catch (e) {
+      setState(() => isProcessing = false);
+      if (mounted) {
+        showMessage(context, 'Pipeline processing error: $e');
+      }
+    }
   }
 
   void captureDemo() {
@@ -50,7 +146,7 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
       hasPreview = true;
       looksGoodClicked = false;
     });
-    showMessage(context, 'Board image captured. Review preview.');
+    showMessage(context, 'Sample board image loaded for testing.');
   }
 
   void onLooksGoodPressed() {
@@ -76,6 +172,34 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
       return;
     }
 
+    // Scenario 2: Enforce 2 unfinished sessions limit per user
+    if (!DemoData.canAddUnfinishedSession) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red),
+              SizedBox(width: 8),
+              Text('Storage Limit Reached'),
+            ],
+          ),
+          content: const Text(
+            'You already have 2 unfinished sessions saved. Due to Supabase database storage limitations, '
+            'a maximum of 2 unfinished sessions can be saved per user.\n\n'
+            'Please generate notes for an existing session or delete an unfinished session before saving a new one.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
     final confirmed = await askConfirmation(
       context,
       title: 'Save Image Input?',
@@ -93,9 +217,21 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
       buffer.writeln('\nVisual board image stored as raw visual.');
     }
 
+    if (currentItem.snapshotId != null) {
+      final prefStr = currentItem.option == BoardImageOption.imageAsIs
+          ? 'IMAGE_ONLY'
+          : currentItem.option == BoardImageOption.ocr
+              ? 'OCR_TEXT_ONLY'
+              : 'BOTH';
+      VisionService().updatePreference(currentItem.snapshotId!, prefStr);
+    }
+
+    final sid = widget.sessionId ?? 'sess_${DateTime.now().millisecondsSinceEpoch}';
+
     DemoData.addInput(
       title: currentItem.title,
       type: 'Board Image',
+      sessionId: sid,
       content: buffer.toString(),
       capturedImages: [currentItem],
     );
@@ -114,6 +250,13 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.isSessionMode ? 'Capture Lecture Board' : 'Board Image Capture'),
+        actions: [
+          IconButton(
+            tooltip: 'Server Connection Settings',
+            icon: const Icon(Icons.router_outlined),
+            onPressed: () => showServerConfigDialog(context),
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(18),
@@ -124,7 +267,7 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
                 ? 'Review image & transcripts with format options'
                 : hasPreview
                     ? 'Verify if image looks good'
-                    : 'Capture a board from your smart glasses',
+                    : 'Capture a board from your smart glasses or mobile camera',
           ),
           if (widget.isSessionMode && widget.sessionTitle != null) ...[
             Container(
@@ -149,7 +292,30 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
               ),
             ),
           ],
-          if (!hasPreview) ...[
+          if (isProcessing) ...[
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  children: [
+                    const CircularProgressIndicator(strokeWidth: 3),
+                    const SizedBox(height: 20),
+                    Text(
+                      processingStatus,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Anonymizing faces with YOLOv8 & extracting text with EasyOCR...',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ] else if (!hasPreview) ...[
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -157,12 +323,12 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
                   children: [
                     const Icon(
                       Icons.camera_alt_outlined,
-                      size: 72,
+                      size: 64,
                       color: Colors.teal,
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Camera Feed Ready',
+                      'Mobile Camera Ready',
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -170,14 +336,38 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Press button below to simulate capturing a whiteboard from smart glasses.',
+                      'Capture whiteboard notes directly from your phone camera or select a photo from your gallery.',
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 20),
-                    ElevatedButton.icon(
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: captureWithCamera,
+                        icon: const Icon(Icons.camera_alt),
+                        label: const Text('Take Photo (Mobile Camera)'),
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: pickFromGallery,
+                        icon: const Icon(Icons.photo_library_outlined),
+                        label: const Text('Upload Photo from Gallery'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton.icon(
                       onPressed: captureDemo,
-                      icon: const Icon(Icons.camera_alt),
-                      label: const Text('Capture Board Image'),
+                      icon: const Icon(Icons.science_outlined, size: 18),
+                      label: const Text('Simulate Glasses Sample'),
                     ),
                   ],
                 ),

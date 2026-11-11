@@ -27,10 +27,17 @@ SET search_path = public, extensions;
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
+    user_id TEXT,                          -- owner of the session (email or uid)
     title TEXT NOT NULL,
     start_time TIMESTAMPTZ DEFAULT now(),
     end_time TIMESTAMPTZ,
     status TEXT CHECK (status IN ('ACTIVE', 'PROCESSING', 'COMPLETED')) DEFAULT 'ACTIVE',
+    -- session management additions
+    notes_generated BOOLEAN DEFAULT FALSE, -- whether notes have been generated for this session
+    expires_at TIMESTAMPTZ,                -- 7-day auto-delete window (NULL = no expiry set yet)
+    input_type TEXT DEFAULT 'Workshop Session', -- 'Workshop Session', 'Audio', 'Image', etc.
+    raw_content TEXT,                      -- serialized session content for notes generation
+    audio_duration TEXT,                   -- human-readable duration string (e.g. '05:32')
     -- audio-pipeline additions
     seminar_topic TEXT,
     topic_centroid_vector vector(384),
@@ -105,9 +112,12 @@ CREATE TABLE IF NOT EXISTS ocr_extractions (
 
 CREATE TABLE IF NOT EXISTS generated_notes (
     note_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL,
+    user_id TEXT,                           -- owner who generated the note
+    title TEXT,                             -- note title
     markdown_content TEXT NOT NULL,
     docx_filepath TEXT,
+    is_satisfactory BOOLEAN,               -- user's satisfaction feedback
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -115,5 +125,6 @@ CREATE TABLE IF NOT EXISTS generated_notes (
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audio_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audio_containers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE image_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ocr_extractions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE generated_notes ENABLE ROW LEVEL SECURITY;

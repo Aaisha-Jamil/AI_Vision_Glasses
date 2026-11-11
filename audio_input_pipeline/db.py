@@ -34,13 +34,32 @@ Rows are dicts (row["col"], dict(row)).
 import os
 import re
 import threading
+import time
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 
+log = logging.getLogger("db")
+
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SCHEMA_FILE = Path(__file__).with_name("schema_postgres.sql")
+
+_USE_MEMORY_FALLBACK = False
+_mem_sessions: dict[str, dict] = {}
+_mem_chunks: dict[str, dict] = {}
+_mem_containers: dict[str, list[dict]] = {}
+
+def is_memory_mode() -> bool:
+    global _USE_MEMORY_FALLBACK
+    if _USE_MEMORY_FALLBACK:
+        return True
+    if not DATABASE_URL or "your-project-ref" in DATABASE_URL or "your-password" in DATABASE_URL:
+        _USE_MEMORY_FALLBACK = True
+        return True
+    return False
+
 
 OVERRIDE_ALIASES = {
     "PENDING": "PENDING",
@@ -89,9 +108,11 @@ def _get_pool():
     global _pool
     with _pool_lock:
         if _pool is None:
-            if not DATABASE_URL:
-                raise RuntimeError("DATABASE_URL is not set - add the Supabase connection "
-                                   "string to .env (see .env.example)")
+            if not DATABASE_URL or "your-project-ref" in DATABASE_URL or "your-password" in DATABASE_URL:
+                raise RuntimeError("DATABASE_URL is not set or contains placeholder values - "
+                                   "add the Supabase connection string to .env (see .env.example)")
+
+
             from pgvector.psycopg import register_vector
             from psycopg.rows import dict_row
             from psycopg_pool import ConnectionPool
@@ -132,17 +153,25 @@ def _expected_columns() -> dict[str, set[str]]:
 
 def init_db():
     """Fail fast with a clear message if the DB is missing a table or column."""
-    with connect() as conn:
-        rows = conn.execute("SELECT table_name, column_name FROM information_schema.columns "
-                            "WHERE table_schema = 'public'").fetchall()
-    have: dict[str, set[str]] = {}
-    for r in rows:
-        have.setdefault(r["table_name"], set()).add(r["column_name"])
-    missing = [f"{t}.{c}" for t, cols in _expected_columns().items()
-               for c in sorted(cols - have.get(t, set()))]
-    if missing:
-        raise RuntimeError(f"Database is missing {len(missing)} column(s): "
-                           f"{', '.join(missing)} - run schema_postgres.sql on it")
+    global _USE_MEMORY_FALLBACK
+    if is_memory_mode():
+        log.info("Running in memory fallback mode (Postgres not configured).")
+        return
+    try:
+        with connect() as conn:
+            rows = conn.execute("SELECT table_name, column_name FROM information_schema.columns "
+                                "WHERE table_schema = 'public'").fetchall()
+        have: dict[str, set[str]] = {}
+        for r in rows:
+            have.setdefault(r["table_name"], set()).add(r["column_name"])
+        missing = [f"{t}.{c}" for t, cols in _expected_columns().items()
+                   for c in sorted(cols - have.get(t, set()))]
+        if missing:
+            raise RuntimeError(f"Database is missing {len(missing)} column(s): "
+                               f"{', '.join(missing)} - run schema_postgres.sql on it")
+    except Exception as e:
+        _USE_MEMORY_FALLBACK = True
+        log.warning("Postgres connection failed (%s); switching to in-memory mode.", e)
 
 
 def to_vec(vec: np.ndarray) -> np.ndarray:
@@ -160,16 +189,109 @@ def from_vec(value) -> np.ndarray:
 
 # ------------------------------------------------------------------ sessions
 
-def create_session(session_id: str, title: str, seminar_topic: str, seed_vector: np.ndarray):
+def create_session(session_id: str, title: str, seminar_topic: str, seed_vector: np.ndarray,
+                   user_id: str | None = None):
+    if is_memory_mode():
+        _mem_sessions[session_id] = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "title": title,
+            "seminar_topic": seminar_topic,
+            "topic_centroid_vector": seed_vector,
+            "flush_count": 0,
+            "topic_match": None,
+            "topic_guard": False,
+            "status": "ACTIVE",
+            "notes_generated": False,
+            "expires_at": None,
+            "start_time": time.time(),
+            "end_time": None
+        }
+        return
     with connect() as conn:
         conn.execute(
-            "INSERT INTO sessions (session_id, title, seminar_topic, topic_centroid_vector) "
-            "VALUES (%s, %s, %s, %s)",
-            (session_id, title, seminar_topic, to_vec(seed_vector)),
+            "INSERT INTO sessions (session_id, user_id, title, seminar_topic, topic_centroid_vector, notes_generated) "
+            "VALUES (%s, %s, %s, %s, %s, FALSE) "
+            "ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)",
+            (session_id, user_id, title, seminar_topic, to_vec(seed_vector)),
         )
 
 
+def count_unfinished_sessions(user_id: str | None = None) -> int:
+    """Returns number of unfinished sessions (notes_generated = FALSE) for the given user."""
+    if is_memory_mode():
+        return sum(
+            1 for s in _mem_sessions.values()
+            if (not user_id or s.get("user_id") == user_id) and not s.get("notes_generated", False)
+        )
+    with connect() as conn:
+        if user_id:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM sessions WHERE (user_id = %s OR user_id IS NULL) "
+                "AND (notes_generated IS FALSE OR notes_generated IS NULL)",
+                (user_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM sessions WHERE (notes_generated IS FALSE OR notes_generated IS NULL)"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+
+def purge_session_inputs(session_id: str) -> bool:
+    """Permanently purges raw inputs (chunks, containers, snapshots) for a session while preserving generated notes."""
+    if is_memory_mode():
+        to_del = [cid for cid, c in _mem_chunks.items() if c.get("session_id") == session_id]
+        for cid in to_del:
+            del _mem_chunks[cid]
+        _mem_containers.pop(session_id, None)
+        if session_id in _mem_sessions:
+            _mem_sessions[session_id]["notes_generated"] = True
+            _mem_sessions[session_id]["expires_at"] = None
+            _mem_sessions[session_id]["raw_content"] = None
+        return True
+    with connect() as conn, conn.transaction():
+        # 1. Delete audio chunks and containers
+        conn.execute("DELETE FROM audio_chunks WHERE session_id = %s", (session_id,))
+        conn.execute("DELETE FROM audio_containers WHERE session_id = %s", (session_id,))
+        # 2. Delete snapshots (cascades to ocr_extractions)
+        conn.execute("DELETE FROM image_snapshots WHERE session_id = %s", (session_id,))
+        # 3. Mark session complete and clear raw storage
+        conn.execute(
+            "UPDATE sessions SET raw_content = NULL, expires_at = NULL, notes_generated = TRUE, status = 'COMPLETED' "
+            "WHERE session_id = %s",
+            (session_id,)
+        )
+    return True
+
+
+def cleanup_expired_sessions() -> list[str]:
+    """Finds all completed sessions whose 7-day retention has passed and purges their inputs."""
+    if is_memory_mode():
+        now = time.time()
+        expired = [
+            sid for sid, s in _mem_sessions.items()
+            if s.get("notes_generated") and s.get("expires_at") and s["expires_at"] < now
+        ]
+        for sid in expired:
+            purge_session_inputs(sid)
+        return expired
+    purged = []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT session_id FROM sessions "
+            "WHERE notes_generated = TRUE AND expires_at IS NOT NULL AND expires_at < NOW()"
+        ).fetchall()
+        expired_ids = [r["session_id"] for r in rows]
+    for sid in expired_ids:
+        purge_session_inputs(sid)
+        purged.append(sid)
+    return purged
+
+
 def get_session(session_id: str) -> dict | None:
+    if is_memory_mode():
+        return _mem_sessions.get(session_id)
     with connect() as conn:
         return conn.execute("SELECT * FROM sessions WHERE session_id = %s",
                             (session_id,)).fetchone()
@@ -179,6 +301,14 @@ def update_topic(session_id: str, vector: np.ndarray, topic_match: float | None 
                  topic_guard: bool = False):
     """After a flush: new topic vector, flush count, and the topic-guard record
     (topic_guard stays TRUE once any flush fired it)."""
+    if is_memory_mode():
+        s = _mem_sessions.get(session_id)
+        if s:
+            s["topic_centroid_vector"] = vector
+            s["flush_count"] = s.get("flush_count", 0) + 1
+            s["topic_match"] = topic_match
+            s["topic_guard"] = s.get("topic_guard", False) or bool(topic_guard)
+        return
     with connect() as conn:
         conn.execute(
             "UPDATE sessions SET topic_centroid_vector = %s, flush_count = flush_count + 1, "
@@ -188,6 +318,12 @@ def update_topic(session_id: str, vector: np.ndarray, topic_match: float | None 
 
 
 def end_session(session_id: str):
+    if is_memory_mode():
+        s = _mem_sessions.get(session_id)
+        if s:
+            s["status"] = "COMPLETED"
+            s["end_time"] = time.time()
+        return
     with connect() as conn:
         conn.execute(
             "UPDATE sessions SET end_time = now(), status = 'COMPLETED' WHERE session_id = %s",
@@ -200,6 +336,28 @@ def end_session(session_id: str):
 def insert_chunk(session_id: str, rec: dict):
     """Called right after transcription (SRS 5.2 incremental logging).
     Similarity/noise fields are filled in later by the flush."""
+    if is_memory_mode():
+        cid = rec["chunk_id"]
+        _mem_chunks[cid] = {
+            "chunk_id": cid,
+            "session_id": session_id,
+            "chunk_index": rec["index"],
+            "start_timestamp": rec["timestamp"],
+            "end_timestamp": rec["timestamp"] + rec["end_offset"] - rec["start_offset"],
+            "audio_filepath": rec["audio_filepath"],
+            "transcript_text": rec["transcript"],
+            "stt_provider": rec["provider"],
+            "similarity_score": None,
+            "is_flagged_noise": False,
+            "user_override_status": "PENDING",
+            "is_mixed": False,
+            "noise_reason": None,
+            "off_topic_text": None,
+            "edited_text": None,
+            "container_index": rec["container_index"],
+            "embedding": None
+        }
+        return
     with connect() as conn:
         conn.execute(
             "INSERT INTO audio_chunks (chunk_id, session_id, chunk_index, start_timestamp, "
@@ -214,6 +372,11 @@ def insert_chunk(session_id: str, rec: dict):
 
 def set_audio_path(chunk_id: str, path: str):
     """After a Supabase Storage upload: supabase://<bucket>/<session_id>/<chunk>.flac"""
+    if is_memory_mode():
+        c = _mem_chunks.get(chunk_id)
+        if c:
+            c["audio_filepath"] = path
+        return
     with connect() as conn:
         conn.execute("UPDATE audio_chunks SET audio_filepath = %s WHERE chunk_id = %s",
                      (path, chunk_id))
@@ -223,6 +386,19 @@ def save_scores(rows: list[tuple[str, np.ndarray, float, bool, bool, str | None,
     """rows: (chunk_id, embedding, similarity, is_noise, is_mixed, noise_reason, off_topic)
     Unflagged chunks become KEEP; flagged ones stay PENDING for review. A decision the
     user already made (not PENDING) is never overwritten."""
+    if is_memory_mode():
+        for cid, e, s, n, m, r, o in rows:
+            c = _mem_chunks.get(cid)
+            if c:
+                c["embedding"] = e
+                c["similarity_score"] = float(s)
+                c["is_flagged_noise"] = bool(n)
+                c["is_mixed"] = bool(m)
+                c["noise_reason"] = r
+                c["off_topic_text"] = "\n".join(o) if o else None
+                if c["user_override_status"] == "PENDING" and not (n or m):
+                    c["user_override_status"] = "KEEP"
+        return
     with connect() as conn, conn.transaction():  # a flush is saved whole or not at all
         conn.cursor().executemany(
             "UPDATE audio_chunks SET embedding = %s, similarity_score = %s, "
@@ -240,6 +416,9 @@ def save_scores(rows: list[tuple[str, np.ndarray, float, bool, bool, str | None,
 
 def scored_chunks(session_id: str) -> list[dict]:
     """Chunks that went through a flush, with what a container summary needs."""
+    if is_memory_mode():
+        chunks = [c for c in _mem_chunks.values() if c["session_id"] == session_id and c["embedding"] is not None and c["container_index"] is not None]
+        return sorted(chunks, key=lambda x: x["start_timestamp"])
     with connect() as conn:
         return conn.execute(
             "SELECT container_index, start_timestamp, end_timestamp, embedding, "
@@ -252,6 +431,9 @@ def scored_chunks(session_id: str) -> list[dict]:
 
 def save_containers(session_id: str, rows: list[dict]):
     """Replace the session's containers (a rebuild after a re-score gives the same keys)."""
+    if is_memory_mode():
+        _mem_containers[session_id] = rows
+        return
     with connect() as conn, conn.transaction():  # never leave the session with no containers
         conn.execute("DELETE FROM audio_containers WHERE session_id = %s", (session_id,))
         conn.cursor().executemany(
@@ -266,6 +448,8 @@ def save_containers(session_id: str, rows: list[dict]):
 
 
 def list_containers(session_id: str) -> list[dict]:
+    if is_memory_mode():
+        return _mem_containers.get(session_id, [])
     with connect() as conn:
         return conn.execute(
             "SELECT container_index, start_timestamp, end_timestamp, chunk_count, "
@@ -282,6 +466,11 @@ def _update_returning(sql: str, params: tuple) -> dict | None:
 
 
 def set_override(chunk_id: str, status: str) -> dict | None:
+    if is_memory_mode():
+        c = _mem_chunks.get(chunk_id)
+        if c:
+            c["user_override_status"] = status
+        return c
     return _update_returning(
         "UPDATE audio_chunks SET user_override_status = %s WHERE chunk_id = %s",
         (status, chunk_id))
@@ -291,6 +480,15 @@ def set_edited_text(chunk_id: str, text: str | None) -> dict | None:
     """Save the user's corrected text and KEEP the chunk (an edit means "use my
     version in the notes"). text=None undoes the edit: original transcript and the
     flush's default again (flagged -> PENDING for review, unflagged -> KEEP)."""
+    if is_memory_mode():
+        c = _mem_chunks.get(chunk_id)
+        if c:
+            c["edited_text"] = text
+            if text is None:
+                c["user_override_status"] = "PENDING" if (c["is_flagged_noise"] or c["is_mixed"]) else "KEEP"
+            else:
+                c["user_override_status"] = "KEEP"
+        return c
     if text is None:
         return _update_returning(
             "UPDATE audio_chunks SET edited_text = NULL, user_override_status = CASE "
@@ -303,6 +501,13 @@ def set_edited_text(chunk_id: str, text: str | None) -> dict | None:
 
 def list_chunks(session_id: str, clean_only: bool = False,
                 review_only: bool = False) -> list[dict]:
+    if is_memory_mode():
+        res = [c for c in _mem_chunks.values() if c["session_id"] == session_id]
+        if clean_only:
+            res = [c for c in res if ((not c["is_flagged_noise"] and c["user_override_status"] != "DISMISS") or c["user_override_status"] == "KEEP")]
+        if review_only:
+            res = [c for c in res if (c["is_flagged_noise"] or c["is_mixed"])]
+        return sorted(res, key=lambda x: x["start_timestamp"])
     where = "session_id = %s"
     if clean_only:
         where += f" AND {CLEAN_FILTER}"
@@ -313,3 +518,4 @@ def list_chunks(session_id: str, clean_only: bool = False,
             f"SELECT {CHUNK_COLUMNS} FROM audio_chunks WHERE {where} ORDER BY start_timestamp",
             (session_id,),
         ).fetchall()
+

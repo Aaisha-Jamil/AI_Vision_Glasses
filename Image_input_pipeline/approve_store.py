@@ -139,12 +139,15 @@ def save_snapshot_to_supabase(snapshot_data):
         "Prefer": "resolution=merge-duplicates"
     }
 
+    ts = float(snapshot_data.get("captured_timestamp") or snapshot_data.get("sequence_timestamp") or time.time())
     payload = {
         "snapshot_id": snapshot_id,
         "session_id": snapshot_data.get("session_id", "session_demo_01"),
-        "sequence_timestamp": float(snapshot_data["sequence_timestamp"]),
-        "captured_timestamp": float(snapshot_data["captured_timestamp"]),
+        "timestamp": ts,
+        "sequence_timestamp": float(snapshot_data.get("sequence_timestamp", ts)),
+        "captured_timestamp": float(snapshot_data.get("captured_timestamp", ts)),
         "blurred_image_url": image_url_to_save,
+        "blurred_filepath": image_url_to_save,
         "storage_path": storage_path or f"lecture-slides/public/{snapshot_id}.jpg",
         "status": snapshot_data.get("status", "APPROVED"),
         "note_inclusion_preference": snapshot_data.get("note_inclusion_preference", "IMAGE_ONLY"),
@@ -160,20 +163,33 @@ def save_snapshot_to_supabase(snapshot_data):
             return True
     except urllib.error.HTTPError as he:
         if he.code == 400:
+            # Fallback directly to core SRS schema fields that Supabase expects
             try:
-                del payload["storage_path"]
-                retry_data = json.dumps(payload).encode('utf-8')
+                srs_payload = {
+                    "snapshot_id": snapshot_id,
+                    "session_id": snapshot_data.get("session_id", "session_demo_01"),
+                    "timestamp": ts,
+                    "blurred_filepath": image_url_to_save,
+                    "note_inclusion_preference": snapshot_data.get("note_inclusion_preference", "IMAGE_ONLY")
+                }
+                retry_data = json.dumps(srs_payload).encode('utf-8')
                 retry_req = urllib.request.Request(endpoint, data=retry_data, headers=headers, method="POST")
                 with urllib.request.urlopen(retry_req, timeout=6) as response:
-                    print(f"[Supabase SUCCESS]: Snapshot '{snapshot_id}' pushed to Cloud Database (fallback payload)!")
+                    print(f"[Supabase SUCCESS]: Snapshot '{snapshot_id}' pushed to Cloud Database (SRS schema)!")
                     return True
             except Exception:
                 pass
-        print(f"[Database Error]: Push to cloud failed (HTTP {he.code}: {he.reason}).")
+        err_msg = ""
+        try:
+            err_msg = he.read().decode('utf-8')
+        except Exception:
+            pass
+        print(f"[Database Error]: Push to cloud failed (HTTP {he.code}: {he.reason} - {err_msg}).")
         return False
     except Exception as e:
         print(f"[Database Error]: Push to cloud failed ({e}).")
         return False
+
 
 def update_snapshot_preference_in_supabase(snapshot_id, preference):
     url, key = get_supabase_config()

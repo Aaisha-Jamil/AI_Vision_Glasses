@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/board_image_item.dart';
+import 'image_loader.dart';
 
 class BoardPreviewWidget extends StatelessWidget {
   const BoardPreviewWidget({
@@ -20,7 +21,59 @@ class BoardPreviewWidget extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    Widget visualImage = Container(
+    Widget content;
+    if (item.option == BoardImageOption.imageAsIs) {
+      content = _buildVisualImage(context, isDark);
+    } else if (item.option == BoardImageOption.ocr) {
+      content = _buildTranscriptSide(context, isDark, theme);
+    } else {
+      content = LayoutBuilder(
+        builder: (ctx, constraints) {
+          if (constraints.maxWidth > 580) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildVisualImage(ctx, isDark)),
+                const SizedBox(width: 14),
+                Expanded(child: _buildTranscriptSide(ctx, isDark, theme)),
+              ],
+            );
+          } else {
+            return Column(
+              children: [
+                _buildVisualImage(ctx, isDark),
+                const SizedBox(height: 12),
+                _buildTranscriptSide(ctx, isDark, theme),
+              ],
+            );
+          }
+        },
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        content,
+        if (showOptionsSelector) ...[
+          const SizedBox(height: 16),
+          const Text(
+            'Select Display / Save Option:',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+          ),
+          const SizedBox(height: 8),
+          _buildOptionSelector(context),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildVisualImage(BuildContext context, bool isDark) {
+    final hasRemote = item.remoteImageUrl != null && item.remoteImageUrl!.isNotEmpty;
+    final hasLocal = localImageExists(item.localImagePath);
+    final hasRealImage = hasRemote || hasLocal;
+
+    return Container(
       height: compact ? 140 : 210,
       width: double.infinity,
       decoration: BoxDecoration(
@@ -40,12 +93,48 @@ class BoardPreviewWidget extends StatelessWidget {
       ),
       child: Stack(
         children: [
-          // Background subtle grid/chalk effect
-          Positioned.fill(
-            child: CustomPaint(
-              painter: _ChalkboardGridPainter(),
+          if (hasRemote)
+            Positioned.fill(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(11),
+                child: Image.network(
+                  item.remoteImageUrl!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => CustomPaint(painter: _ChalkboardGridPainter()),
+                ),
+              ),
+            )
+          else if (hasLocal && loadLocalImage(item.localImagePath) != null)
+            Positioned.fill(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(11),
+                child: loadLocalImage(item.localImagePath)!,
+              ),
+            )
+          else
+            Positioned.fill(
+              child: CustomPaint(
+                painter: _ChalkboardGridPainter(),
+              ),
             ),
-          ),
+          // Subtle gradient overlay when displaying real photo
+          if (hasRealImage)
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(11),
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.7),
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.75),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.all(12),
             child: Column(
@@ -84,48 +173,77 @@ class BoardPreviewWidget extends StatelessWidget {
                   ],
                 ),
                 const Spacer(),
-                // Board visual diagram
-                Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.white24),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _buildDiagramBox('Audio/Camera'),
-                            const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 6),
-                              child: Icon(Icons.arrow_forward, color: Colors.white70, size: 14),
-                            ),
-                            _buildDiagramBox('YOLO Blur'),
-                            const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 6),
-                              child: Icon(Icons.arrow_forward, color: Colors.white70, size: 14),
-                            ),
-                            _buildDiagramBox('OCR/NLP'),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          r'L_privacy = \lambda \cdot ||I_{blur} - I_{orig}||',
-                          style: TextStyle(
-                            color: Colors.amberAccent,
-                            fontFamily: 'monospace',
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
+                // Real photo badge or chalkboard diagram
+                if (!hasRealImage)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildDiagramBox('Audio/Camera'),
+                              const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 6),
+                                child: Icon(Icons.arrow_forward, color: Colors.white70, size: 14),
+                              ),
+                              _buildDiagramBox('YOLO Blur'),
+                              const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 6),
+                                child: Icon(Icons.arrow_forward, color: Colors.white70, size: 14),
+                              ),
+                              _buildDiagramBox('OCR/NLP'),
+                            ],
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 8),
+                          const Text(
+                            r'L_privacy = \lambda \cdot ||I_{blur} - I_{orig}||',
+                            style: TextStyle(
+                              color: Colors.amberAccent,
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.65),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.tealAccent.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.shield_outlined, color: Colors.tealAccent, size: 18),
+                          const SizedBox(width: 8),
+                          Text(
+                            item.peopleDetected > 0
+                                ? 'YOLOv8 Shield: ${item.peopleDetected} Person(s) Blurred'
+                                : 'YOLOv8 Privacy Shield: Verified Active',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
                 const Spacer(),
                 Text(
                   item.title,
@@ -142,8 +260,10 @@ class BoardPreviewWidget extends StatelessWidget {
         ],
       ),
     );
+  }
 
-    Widget transcriptSide = Container(
+  Widget _buildTranscriptSide(BuildContext context, bool isDark, ThemeData theme) {
+    return Container(
       height: compact ? 140 : 210,
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -183,7 +303,7 @@ class BoardPreviewWidget extends StatelessWidget {
           const Divider(height: 12),
           Expanded(
             child: SingleChildScrollView(
-              child: SelectableText(
+              child: Text(
                 item.ocrText,
                 style: TextStyle(
                   fontSize: compact ? 11 : 12,
@@ -196,49 +316,6 @@ class BoardPreviewWidget extends StatelessWidget {
           ),
         ],
       ),
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (item.option == BoardImageOption.imageAsIs)
-          visualImage
-        else if (item.option == BoardImageOption.ocr)
-          transcriptSide
-        else
-          // Both: Show image with transcripts at side (responsive row/column)
-          LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth > 580) {
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: visualImage),
-                    const SizedBox(width: 14),
-                    Expanded(child: transcriptSide),
-                  ],
-                );
-              } else {
-                return Column(
-                  children: [
-                    visualImage,
-                    const SizedBox(height: 12),
-                    transcriptSide,
-                  ],
-                );
-              }
-            },
-          ),
-        if (showOptionsSelector) ...[
-          const SizedBox(height: 16),
-          const Text(
-            'Select Display / Save Option:',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-          ),
-          const SizedBox(height: 8),
-          _buildOptionSelector(context),
-        ],
-      ],
     );
   }
 

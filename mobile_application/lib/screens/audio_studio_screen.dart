@@ -2,7 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
+import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/audio_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'board_camera_screen.dart';
@@ -29,7 +31,9 @@ class LectureTranscriptEntry {
 }
 
 class AudioStudioScreen extends StatefulWidget {
-  const AudioStudioScreen({super.key});
+  const AudioStudioScreen({super.key, this.resumedSession});
+
+  final SavedInput? resumedSession;
 
   @override
   State<AudioStudioScreen> createState() => _AudioStudioScreenState();
@@ -43,11 +47,83 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
   late List<LectureTranscriptEntry> sessionTranscriptEntries;
   final List<CapturedImageItem> sessionCapturedImages = [];
+  StreamSubscription? _liveTranscriptSub;
+  bool isLiveBackend = false;
+  String? currentSessionId;
 
   @override
   void initState() {
     super.initState();
-    _resetTranscriptEntries();
+    if (widget.resumedSession != null) {
+      _loadResumedSession(widget.resumedSession!);
+    } else {
+      currentSessionId = 'sess_${DateTime.now().millisecondsSinceEpoch}';
+      _resetTranscriptEntries();
+    }
+    _initLiveTranscriptListener();
+  }
+
+  void _loadResumedSession(SavedInput s) {
+    currentSessionId = s.sessionId;
+    if (s.audioDuration != null && s.audioDuration!.contains(':')) {
+      final parts = s.audioDuration!.split(':');
+      final m = int.tryParse(parts[0]) ?? 0;
+      final sec = int.tryParse(parts[1]) ?? 0;
+      seconds = m * 60 + sec;
+    }
+    sessionTranscriptEntries = s.transcriptLines.map((l) {
+      return LectureTranscriptEntry(
+        id: l.id,
+        timestamp: l.timestamp,
+        text: l.text,
+        secondTrigger: l.secondTrigger,
+        isFlagged: l.isFlagged,
+        flagReason: l.flagReason,
+      );
+    }).toList();
+    sessionCapturedImages.clear();
+    sessionCapturedImages.addAll(s.capturedImages);
+  }
+
+  void _initLiveTranscriptListener() {
+    _liveTranscriptSub = AudioService().liveTranscriptStream.listen((data) {
+      if (!mounted) return;
+      final type = data['type'] as String?;
+      if (type == 'chunk_created' || data.containsKey('transcript') || data.containsKey('transcript_text')) {
+        final text = (data['transcript'] ?? data['transcript_text'] ?? '').toString().trim();
+        if (text.isEmpty) return;
+        final chunkId = (data['chunk_id'] ?? data['id'] ?? 'chunk_${DateTime.now().millisecondsSinceEpoch}').toString();
+        final isNoise = data['is_noise'] == true || data['is_flagged_noise'] == true;
+        final reason = (data['reason'] ?? data['noise_reason'] ?? 'Flagged Noise').toString();
+
+        setState(() {
+          isLiveBackend = true;
+          final existingIdx = sessionTranscriptEntries.indexWhere((e) => e.id == chunkId);
+          if (existingIdx >= 0) {
+            sessionTranscriptEntries[existingIdx].text = text;
+            sessionTranscriptEntries[existingIdx].isFlagged = isNoise;
+          } else {
+            sessionTranscriptEntries.add(
+              LectureTranscriptEntry(
+                id: chunkId,
+                timestamp: timeText,
+                text: text,
+                secondTrigger: seconds,
+                isFlagged: isNoise,
+                flagReason: reason,
+              ),
+            );
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _liveTranscriptSub?.cancel();
+    timer?.cancel();
+    super.dispose();
   }
 
   void _resetTranscriptEntries() {
@@ -149,17 +225,33 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
         .toList();
   }
 
-  void startRecording() {
+  Future<void> startRecording() async {
     timer?.cancel();
     setState(() {
       seconds = 0;
       isRecording = true;
       isPaused = false;
-      _resetTranscriptEntries();
+      isLiveBackend = false;
+      sessionTranscriptEntries.clear();
     });
+
+    try {
+      final res = await AudioService().startSession(
+        title: 'Lecture Workshop Session #${DemoData.nextInputId}',
+        source: 'server_mic',
+      );
+      currentSessionId = res['session_id'] as String?;
+    } catch (_) {}
+
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || isPaused) return;
-      setState(() => seconds++);
+      setState(() {
+        seconds++;
+        // If not connected to live backend after 6 seconds, show sample entries so user is never stuck
+        if (!isLiveBackend && sessionTranscriptEntries.isEmpty && seconds > 5) {
+          _resetTranscriptEntries();
+        }
+      });
     });
   }
 
@@ -168,22 +260,32 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     setState(() => isPaused = !isPaused);
   }
 
-  void stopRecording() {
+  Future<void> stopRecording() async {
     timer?.cancel();
     setState(() {
       isRecording = false;
       isPaused = false;
     });
-    showMessage(
-      context,
-      'Lecture recording completed. Flagged noise lines are now highlighted in red below with Keep, Delete, and Edit options.',
-    );
+
+    try {
+      await AudioService().stopSession();
+    } catch (_) {}
+
+    if (mounted) {
+      showMessage(
+        context,
+        'Lecture recording completed. Flagged noise lines are now highlighted in red below with Keep, Delete, and Edit options.',
+      );
+    }
   }
 
   void keepFlaggedLine(LectureTranscriptEntry entry) {
     setState(() {
       entry.isFlagged = false;
     });
+    if (!entry.id.startsWith('line_')) {
+      AudioService().overrideChunk(entry.id, 'KEPT');
+    }
     showMessage(context, 'Line kept in transcripts.');
   }
 
@@ -191,6 +293,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     setState(() {
       sessionTranscriptEntries.removeWhere((e) => e.id == entry.id);
     });
+    if (!entry.id.startsWith('line_')) {
+      AudioService().overrideChunk(entry.id, 'DELETED');
+    }
     showMessage(context, 'Transcript line deleted.');
   }
 
@@ -288,11 +393,13 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
   }
 
   Future<void> openCameraToCaptureImage() async {
+    currentSessionId ??= 'sess_${DateTime.now().millisecondsSinceEpoch}';
     final capturedItem = await Navigator.push<CapturedImageItem>(
       context,
       MaterialPageRoute(
         builder: (_) => BoardCameraScreen(
           isSessionMode: true,
+          sessionId: currentSessionId,
           sessionTitle: 'Workshop Lecture ($timeText)',
         ),
       ),
@@ -309,6 +416,11 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
         diagramType: capturedItem.diagramType,
         capturedAtSecond: seconds,
         capturedAt: capturedItem.capturedAt,
+        localImagePath: capturedItem.localImagePath,
+        remoteImageUrl: capturedItem.remoteImageUrl,
+        snapshotId: capturedItem.snapshotId,
+        confidenceScore: capturedItem.confidenceScore,
+        peopleDetected: capturedItem.peopleDetected,
       );
       setState(() {
         sessionCapturedImages.add(itemWithTime);
@@ -339,6 +451,14 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
   }
 
   Future<void> saveSessionToSavedInputs() async {
+    // Scenario 2: Enforce session quota (max 2 unfinished sessions per user)
+    final isExistingSession = currentSessionId != null &&
+        DemoData.savedInputs.any((s) => s.sessionId == currentSessionId);
+    if (!isExistingSession && !DemoData.canAddUnfinishedSession) {
+      await showStorageQuotaExceededDialog(context);
+      return;
+    }
+
     if (isRecording) {
       final shouldStop = await askConfirmation(
         context,
@@ -427,6 +547,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       ),
     );
 
+    // Yield one frame so the dialog route completes its pop before next state/route operations
+    await Future.delayed(Duration.zero);
+
     if (!mounted || shouldSave != true) {
       nameController.dispose();
       return;
@@ -438,6 +561,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     nameController.dispose();
 
     DemoData.addSessionInput(
+      sessionId: currentSessionId,
       title: sessionName,
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
@@ -446,7 +570,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     );
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      messenger?.hideCurrentSnackBar();
+      messenger?.showSnackBar(
         SnackBar(
           content: Text('Session "$sessionName" saved in Saved Inputs.'),
           action: SnackBarAction(
@@ -506,6 +632,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     if (!mounted || !shouldSave) return;
 
     final session = DemoData.addSessionInput(
+      sessionId: currentSessionId,
       title: 'Workshop Lecture Session #${DemoData.nextInputId}',
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
@@ -513,8 +640,18 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       allTranscriptLines: allTranscriptLineItems,
     );
 
-    DemoData.generateNotesForInput(session);
-    showMessage(context, 'Comprehensive demo notes generated and saved.');
+    final note = DemoData.generateNotesForInput(session);
+    if (note != null && mounted) {
+      // Scenario 1: Document generated -> prompt keep/discard inputs workflow
+      await showPostNoteGenerationRetentionDialog(
+        context: context,
+        session: session,
+        note: note,
+        onDone: () {
+          if (mounted) setState(() {});
+        },
+      );
+    }
   }
 
   // ── Helper builders ───────────────────────────────────────────────────────
@@ -803,12 +940,6 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
   }
 
   @override
-  void dispose() {
-    timer?.cancel();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
@@ -816,7 +947,16 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     final hasFlaggedLines = entries.any((e) => e.isFlagged);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Multi-Input Notes Studio')),
+      appBar: AppBar(
+        title: const Text('Multi-Input Notes Studio'),
+        actions: [
+          IconButton(
+            tooltip: 'Server Connection Settings',
+            icon: const Icon(Icons.router_outlined),
+            onPressed: () => showServerConfigDialog(context),
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(18),
         children: [
