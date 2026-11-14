@@ -28,3 +28,9 @@ pgvector>=0.2.5
 ultralytics>=8.1.0
 opencv-python>=4.9.0.80
 easyocr>=1.7.1
+
+# --- AI Note Synthesis & Document Generation ---
+google-generativeai>=0.8.0
+python-docx>=1.1.0
+latex2mathml>=3.80.0
+lxml>=5.0.0
