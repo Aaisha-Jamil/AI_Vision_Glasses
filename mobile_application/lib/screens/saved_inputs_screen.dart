@@ -3,6 +3,7 @@ import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../theme/app_theme.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'saved_notes_screen.dart';
@@ -17,6 +18,8 @@ class SavedInputsScreen extends StatefulWidget {
 }
 
 class _SavedInputsScreenState extends State<SavedInputsScreen> {
+  Color get primaryCol => AppTheme.primary(context);
+
   @override
   void initState() {
     super.initState();
@@ -28,8 +31,13 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     if (mounted) setState(() {});
   }
 
+  
   Future<void> generateNotes(SavedInput input) async {
-    final note = DemoData.generateNotesForInput(input);
+    final note = await DemoData.generateAiNotesForInput(input);
+
+    // Screen dispose ho chuki ho to aage UI update na karein.
+    if (!mounted) return;
+
     setState(() {});
 
     if (note == null) {
@@ -37,11 +45,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       return;
     }
 
-    if (!mounted) return;
-
     // Scenario 1: Document Has Been Generated
-    // Prompt Keep or Discard, recommend discard due to limited storage,
-    // show confirmation dialog, and retain the generated document safely.
+    // Prompt Keep or Discard.
     await showPostNoteGenerationRetentionDialog(
       context: context,
       session: input,
@@ -51,6 +56,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       },
     );
   }
+
 
   Future<void> discardInputsNow(SavedInput input) async {
     final confirmed = await askConfirmation(
@@ -121,7 +127,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             children: [
               Icon(
                 line.isFlagged ? Icons.warning_amber_rounded : Icons.edit_note,
-                color: line.isFlagged ? Colors.red : Colors.teal,
+                color: line.isFlagged ? AppTheme.danger : primaryCol,
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -143,7 +149,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.12),
+                    color: primaryCol.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -240,11 +246,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
-              Icon(Icons.photo_library_outlined, size: 16, color: Colors.teal),
-              SizedBox(width: 6),
-              Text(
+              Icon(Icons.photo_library_outlined, size: 16, color: primaryCol),
+              const SizedBox(width: 6),
+              const Text(
                 'Captured Board Images',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
               ),
@@ -320,11 +326,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Section header
-        const Row(
+        Row(
           children: [
-            Icon(Icons.mic, size: 16, color: Colors.teal),
-            SizedBox(width: 6),
-            Text(
+            Icon(Icons.mic, size: 16, color: primaryCol),
+            const SizedBox(width: 6),
+            const Text(
               'Lecture Audio Transcripts & Board Captures',
               style:
                   TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
@@ -338,19 +344,19 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             padding:
                 const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.red.withValues(alpha: 0.08),
+              color: AppTheme.danger.withValues(alpha: 0.08),
               borderRadius: BorderRadius.circular(6),
               border:
-                  Border.all(color: Colors.red.withValues(alpha: 0.2)),
+                  Border.all(color: AppTheme.danger.withValues(alpha: 0.2)),
             ),
             child: const Row(
               children: [
-                Icon(Icons.info_outline, color: Colors.red, size: 16),
+                Icon(Icons.info_outline, color: AppTheme.danger, size: 16),
                 SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     'Flagged noise lines are highlighted below. Use Keep, Edit, or Delete to manage.',
-                    style: TextStyle(fontSize: 11, color: Colors.red),
+                    style: TextStyle(fontSize: 11, color: AppTheme.danger),
                   ),
                 ),
               ],
@@ -373,12 +379,12 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: Colors.teal.withValues(alpha: 0.45),
+          color: primaryCol.withValues(alpha: 0.45),
           width: 1.5,
         ),
         color: isDark
-            ? Colors.teal.withValues(alpha: 0.06)
-            : Colors.teal.withValues(alpha: 0.03),
+            ? primaryCol.withValues(alpha: 0.06)
+            : primaryCol.withValues(alpha: 0.03),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -388,23 +394,23 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             padding:
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.teal.withValues(alpha: 0.12),
+              color: primaryCol.withValues(alpha: 0.12),
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(10),
               ),
             ),
             child: Row(
               children: [
-                const Icon(Icons.camera_alt_outlined,
-                    size: 15, color: Colors.teal),
+                Icon(Icons.camera_alt_outlined,
+                    size: 15, color: primaryCol),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     img.title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 12,
-                      color: Colors.teal,
+                      color: primaryCol,
                     ),
                   ),
                 ),
@@ -412,15 +418,15 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.2),
+                    color: primaryCol.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
                     img.option.label,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
-                      color: Colors.teal,
+                      color: primaryCol,
                     ),
                   ),
                 ),
@@ -468,11 +474,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Row(
+        Row(
           children: [
-            Icon(Icons.mic, size: 16, color: Colors.teal),
-            SizedBox(width: 6),
-            Text(
+            Icon(Icons.mic, size: 16, color: primaryCol),
+            const SizedBox(width: 6),
+            const Text(
               'Lecture Audio Transcripts',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
             ),
@@ -504,16 +510,16 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 5, vertical: 2),
                           decoration: BoxDecoration(
-                            color: Colors.teal.withValues(alpha: 0.12),
+                            color: primaryCol.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
                             '[$time]',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontFamily: 'monospace',
                               fontSize: 10,
                               fontWeight: FontWeight.bold,
-                              color: Colors.teal,
+                              color: primaryCol,
                             ),
                           ),
                         ),
@@ -550,10 +556,10 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color:
-            isDark ? const Color(0xFF381A20) : const Color(0xFFFFEBEE),
+            isDark ? AppTheme.dangerSurfaceDark : AppTheme.dangerSurfaceLight,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: isDark ? Colors.red.shade700 : Colors.red.shade300,
+          color: isDark ? AppTheme.dangerDark : AppTheme.dangerSoft,
           width: 1.5,
         ),
       ),
@@ -566,7 +572,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.red.withValues(alpha: 0.18),
+                  color: AppTheme.danger.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
@@ -576,7 +582,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                     fontSize: 11,
                     fontWeight: FontWeight.bold,
                     color:
-                        isDark ? Colors.red.shade200 : Colors.red.shade800,
+                        isDark ? AppTheme.dangerLight : AppTheme.dangerDeep,
                   ),
                 ),
               ),
@@ -585,7 +591,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.red,
+                  color: AppTheme.danger,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Row(
@@ -612,7 +618,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                   fontSize: 11,
                   fontStyle: FontStyle.italic,
                   color:
-                      isDark ? Colors.red.shade200 : Colors.red.shade700,
+                      isDark ? AppTheme.dangerLight : AppTheme.dangerDark,
                 ),
               ),
             ],
@@ -624,7 +630,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
               fontSize: 13,
               height: 1.4,
               fontWeight: FontWeight.w500,
-              color: isDark ? Colors.white : Colors.black87,
+              color: isDark ? Colors.white : AppTheme.ink,
             ),
           ),
           const SizedBox(height: 10),
@@ -634,11 +640,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             children: [
               OutlinedButton.icon(
                 onPressed: () => keepFlaggedLine(line),
-                icon: const Icon(Icons.check, size: 14, color: Colors.teal),
-                label: const Text('Keep',
-                    style: TextStyle(color: Colors.teal, fontSize: 12)),
+                icon: Icon(Icons.check, size: 14, color: primaryCol),
+                label: Text('Keep',
+                    style: TextStyle(color: primaryCol, fontSize: 12)),
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.teal),
+                  side: BorderSide(color: primaryCol),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
@@ -648,11 +654,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
               OutlinedButton.icon(
                 onPressed: () => editTranscriptLine(line),
                 icon: const Icon(Icons.edit_outlined,
-                    size: 14, color: Colors.blue),
+                    size: 14, color: AppTheme.info),
                 label: const Text('Edit',
-                    style: TextStyle(color: Colors.blue, fontSize: 12)),
+                    style: TextStyle(color: AppTheme.info, fontSize: 12)),
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.blue),
+                  side: const BorderSide(color: AppTheme.info),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
@@ -666,7 +672,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                 label: const Text('Delete',
                     style: TextStyle(color: Colors.white, fontSize: 12)),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
+                  backgroundColor: AppTheme.danger,
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
@@ -687,7 +693,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       decoration: BoxDecoration(
         color: isDark
             ? Colors.white.withValues(alpha: 0.03)
-            : const Color(0xFFF8FAFB),
+            : AppTheme.paleSea,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
             color:
@@ -722,7 +728,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.edit_outlined,
-                size: 16, color: Colors.grey),
+                size: 16, color: AppTheme.mutedText),
             tooltip: 'Edit line',
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
@@ -784,13 +790,13 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: DemoData.canAddSession
-                  ? Colors.teal.withValues(alpha: 0.08)
-                  : Colors.red.withValues(alpha: 0.08),
+                  ? primaryCol.withValues(alpha: 0.08)
+                  : AppTheme.danger.withValues(alpha: 0.08),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: DemoData.canAddSession
-                    ? Colors.teal.withValues(alpha: 0.3)
-                    : Colors.red.withValues(alpha: 0.3),
+                    ? primaryCol.withValues(alpha: 0.3)
+                    : AppTheme.danger.withValues(alpha: 0.3),
               ),
             ),
             child: Row(
@@ -798,7 +804,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                 Icon(
                   DemoData.canAddUnfinishedSession ? Icons.storage : Icons.warning_amber_rounded,
                   size: 20,
-                  color: DemoData.canAddUnfinishedSession ? Colors.teal : Colors.red,
+                  color: DemoData.canAddUnfinishedSession ? primaryCol : AppTheme.danger,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -810,7 +816,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
-                          color: DemoData.canAddUnfinishedSession ? Colors.teal : Colors.red,
+                          color: DemoData.canAddUnfinishedSession ? primaryCol : AppTheme.danger,
                         ),
                       ),
                       const SizedBox(height: 2),
@@ -820,7 +826,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             : 'Storage limit reached! Generate notes or delete an unfinished session to free a slot.',
                         style: TextStyle(
                           fontSize: 11,
-                          color: DemoData.canAddUnfinishedSession ? Colors.teal.shade700 : Colors.red.shade700,
+                          color: DemoData.canAddUnfinishedSession ? primaryCol : AppTheme.dangerDark,
                         ),
                       ),
                     ],
@@ -836,7 +842,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                 child: Column(
                   children: [
                     if (DemoData.isSyncing) ...[
-                      const CircularProgressIndicator(color: Colors.teal),
+                      CircularProgressIndicator(color: primaryCol),
                       const SizedBox(height: 14),
                       const Text(
                         'Loading sessions from Supabase…',
@@ -844,8 +850,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             fontSize: 15, fontWeight: FontWeight.w600),
                       ),
                     ] else ...[
-                      const Icon(Icons.inventory_2_outlined,
-                          size: 56, color: Colors.teal),
+                      Icon(Icons.inventory_2_outlined,
+                          size: 56, color: primaryCol),
                       const SizedBox(height: 14),
                       const Text(
                         'No saved inputs yet',
@@ -864,7 +870,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         icon: const Icon(Icons.refresh),
                         label: const Text('Retry Loading Sessions'),
                         style: FilledButton.styleFrom(
-                          backgroundColor: Colors.teal,
+                          backgroundColor: primaryCol,
                           foregroundColor: Colors.white,
                         ),
                       ),
@@ -889,7 +895,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                       children: [
                         CircleAvatar(
                           backgroundColor: isWorkshop
-                              ? Colors.teal.withValues(alpha: 0.15)
+                              ? primaryCol.withValues(alpha: 0.15)
                               : theme.colorScheme.primary
                                   .withValues(alpha: 0.15),
                           child: Icon(
@@ -899,7 +905,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                                     ? Icons.graphic_eq
                                     : Icons.image_outlined,
                             color: isWorkshop
-                                ? Colors.teal
+                                ? primaryCol
                                 : theme.colorScheme.primary,
                           ),
                         ),
@@ -923,7 +929,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                                         horizontal: 8, vertical: 2),
                                     decoration: BoxDecoration(
                                       color: isWorkshop
-                                          ? Colors.teal
+                                          ? primaryCol
                                               .withValues(alpha: 0.15)
                                           : theme.colorScheme
                                               .surfaceContainerHighest,
@@ -936,7 +942,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                                         fontSize: 11,
                                         fontWeight: FontWeight.bold,
                                         color: isWorkshop
-                                            ? Colors.teal
+                                            ? primaryCol
                                             : null,
                                       ),
                                     ),
@@ -947,7 +953,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                                       '• Duration: ${input.audioDuration}',
                                       style: const TextStyle(
                                           fontSize: 12,
-                                          color: Colors.grey),
+                                          color: AppTheme.mutedText),
                                     ),
                                   ],
                                 ],
@@ -960,7 +966,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                               ? 'Delete Session'
                               : 'Delete Input',
                           icon: const Icon(Icons.delete_outline,
-                              color: Colors.red),
+                              color: AppTheme.danger),
                           onPressed: () => deleteSession(input),
                         ),
                       ],
@@ -975,34 +981,34 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
-                          color: Colors.teal.withValues(alpha: 0.08),
+                          color: primaryCol.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                              color: Colors.teal.withValues(alpha: 0.2)),
+                              color: primaryCol.withValues(alpha: 0.2)),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.graphic_eq,
-                                size: 16, color: Colors.teal),
+                            Icon(Icons.graphic_eq,
+                                size: 16, color: primaryCol),
                             const SizedBox(width: 6),
                             Text(
                               input.audioDuration ?? '00:00',
-                              style: const TextStyle(
+                              style: TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 12,
-                                  color: Colors.teal),
+                                  color: primaryCol),
                             ),
                             const SizedBox(width: 10),
                             Text(
                               '• ${input.transcriptLines.isNotEmpty ? input.transcriptLines.length : input.audioTranscripts.length} lines',
                               style: const TextStyle(
-                                  fontSize: 11, color: Colors.grey),
+                                  fontSize: 11, color: AppTheme.mutedText),
                             ),
                             const SizedBox(width: 8),
                             Text(
                               '• ${input.capturedImages.length} images',
                               style: const TextStyle(
-                                  fontSize: 11, color: Colors.grey),
+                                  fontSize: 11, color: AppTheme.mutedText),
                             ),
                             const Spacer(),
                             TextButton.icon(
@@ -1017,12 +1023,12 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                                   if (mounted) setState(() {});
                                 });
                               },
-                              icon: const Icon(Icons.open_in_new,
-                                  size: 13, color: Colors.teal),
-                              label: const Text(
+                              icon: Icon(Icons.open_in_new,
+                                  size: 13, color: primaryCol),
+                              label: Text(
                                 'Studio Mode',
                                 style: TextStyle(
-                                  color: Colors.teal,
+                                  color: primaryCol,
                                   fontSize: 11,
                                   fontWeight: FontWeight.bold,
                                 ),
@@ -1066,8 +1072,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                               ? Icons.check_circle
                               : Icons.pending_outlined,
                           color: input.notesGenerated
-                              ? Colors.green
-                              : Colors.orange,
+                              ? AppTheme.success
+                              : AppTheme.warning,
                           size: 18,
                         ),
                         const SizedBox(width: 6),
@@ -1090,13 +1096,13 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           color: (input.daysRemaining ?? 0) <= 1
-                              ? Colors.red.withValues(alpha: 0.08)
-                              : Colors.orange.withValues(alpha: 0.08),
+                              ? AppTheme.danger.withValues(alpha: 0.08)
+                              : AppTheme.warning.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
                             color: (input.daysRemaining ?? 0) <= 1
-                                ? Colors.red.withValues(alpha: 0.3)
-                                : Colors.orange.withValues(alpha: 0.3),
+                                ? AppTheme.danger.withValues(alpha: 0.3)
+                                : AppTheme.warning.withValues(alpha: 0.3),
                           ),
                         ),
                         child: Row(
@@ -1104,7 +1110,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             Icon(
                               Icons.schedule,
                               size: 14,
-                              color: (input.daysRemaining ?? 0) <= 1 ? Colors.red : Colors.orange,
+                              color: (input.daysRemaining ?? 0) <= 1 ? AppTheme.danger : AppTheme.warning,
                             ),
                             const SizedBox(width: 6),
                             Text(
@@ -1112,7 +1118,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
-                                color: (input.daysRemaining ?? 0) <= 1 ? Colors.red : Colors.orange,
+                                color: (input.daysRemaining ?? 0) <= 1 ? AppTheme.danger : AppTheme.warning,
                               ),
                             ),
                           ],
@@ -1132,7 +1138,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             icon: const Icon(Icons.auto_awesome, size: 16),
                             label: const Text('Generate Notes'),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.teal,
+                              backgroundColor: primaryCol,
                               foregroundColor: Colors.white,
                             ),
                           ),
@@ -1151,8 +1157,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                               icon: const Icon(Icons.edit_note, size: 16),
                               label: const Text('Reopen & Edit'),
                               style: FilledButton.styleFrom(
-                                backgroundColor: Colors.teal.withValues(alpha: 0.18),
-                                foregroundColor: Colors.teal,
+                                backgroundColor: primaryCol.withValues(alpha: 0.18),
+                                foregroundColor: primaryCol,
                               ),
                             ),
                         ],
@@ -1162,7 +1168,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             icon: const Icon(Icons.delete_sweep, size: 16),
                             label: const Text('Discard Inputs Now'),
                             style: FilledButton.styleFrom(
-                              backgroundColor: Colors.red.shade700,
+                              backgroundColor: AppTheme.dangerDark,
                               foregroundColor: Colors.white,
                             ),
                           ),
@@ -1182,20 +1188,20 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                             icon: const Icon(Icons.mic, size: 16),
                             label: const Text('Studio View'),
                             style: OutlinedButton.styleFrom(
-                              foregroundColor: Colors.teal,
-                              side: BorderSide(color: Colors.teal.withValues(alpha: 0.5)),
+                              foregroundColor: primaryCol,
+                              side: BorderSide(color: primaryCol.withValues(alpha: 0.5)),
                             ),
                           ),
                         OutlinedButton.icon(
                           onPressed: () => deleteSession(input),
                           icon: const Icon(Icons.delete_outline,
-                              color: Colors.red, size: 16),
+                              color: AppTheme.danger, size: 16),
                           label: const Text(
                             'Delete',
-                            style: TextStyle(color: Colors.red),
+                            style: TextStyle(color: AppTheme.danger),
                           ),
                           style: OutlinedButton.styleFrom(
-                            side: const BorderSide(color: Colors.red),
+                            side: const BorderSide(color: AppTheme.danger),
                           ),
                         ),
                       ],

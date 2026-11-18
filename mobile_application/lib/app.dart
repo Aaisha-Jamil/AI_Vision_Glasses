@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
-import 'screens/login_screen.dart';
+
+import 'screens/dashboard_screen.dart';
 import 'theme/app_theme.dart';
+import 'widgets/auth_gate.dart';
 
 class NotesPrivacyApp extends StatefulWidget {
   const NotesPrivacyApp({super.key});
@@ -29,7 +31,13 @@ class _NotesPrivacyAppState extends State<NotesPrivacyApp> {
           theme: AppTheme.lightTheme,
           darkTheme: AppTheme.darkTheme,
           themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
-          home: LoginScreen(themeNotifier: darkMode),
+          home: AuthGate(
+            themeNotifier: darkMode,
+            authenticatedChild: DashboardScreen(
+              themeNotifier: darkMode,
+              email: 'Authenticated User',
+            ),
+          ),
         );
       },
     );

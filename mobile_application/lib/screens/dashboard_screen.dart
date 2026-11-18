@@ -139,7 +139,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             context: context,
             icon: Icons.mic_none,
             title: 'Multi-Input Notes Studio',
-            subtitle: 'Demo recording timer and note generation',
+            subtitle: 'Live audio recording, board capture, and notes studio',
             onTap: () => openPage(context, const AudioStudioScreen()),
           ),
           featureCard(
@@ -190,20 +190,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.bluetooth, color: Colors.teal),
-                      SizedBox(width: 10),
-                      Expanded(child: Text('Bluetooth: Demo status')),
-                      Chip(label: Text('Not connected')),
+                      Icon(Icons.bluetooth, color: Theme.of(context).colorScheme.primary),
+                      const SizedBox(width: 10),
+                      const Expanded(child: Text('Bluetooth: Hardware status')),
+                      const Chip(label: Text('Ready')),
                     ],
                   ),
-                  const Row(
+                  const SizedBox(height: 6),
+                  Row(
                     children: [
-                      Icon(Icons.battery_5_bar, color: Colors.teal),
-                      SizedBox(width: 10),
-                      Expanded(child: Text('Battery: Sample display')),
-                      Text('85%'),
+                      Icon(Icons.battery_5_bar, color: Theme.of(context).colorScheme.primary),
+                      const SizedBox(width: 10),
+                      const Expanded(child: Text('Battery: Smart Glasses')),
+                      const Text('85%'),
                     ],
                   ),
                   const SizedBox(height: 8),

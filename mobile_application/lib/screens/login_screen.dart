@@ -1,5 +1,8 @@
+
 import 'package:flutter/material.dart';
+
 import '../data/demo_data.dart';
+import '../services/auth_service.dart';
 import 'dashboard_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -16,31 +19,78 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final formKey = GlobalKey<FormState>();
+
+  final fullNameController = TextEditingController();
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
+
   bool isSignup = false;
   bool hidePassword = true;
+  bool isLoading = false;
 
   @override
   void dispose() {
+    fullNameController.dispose();
     emailController.dispose();
     passwordController.dispose();
     super.dispose();
   }
 
-  void openDashboard() {
+  Future<void> authenticate() async {
     if (!(formKey.currentState?.validate() ?? false)) return;
+    if (isLoading) return;
+
+    FocusScope.of(context).unfocus();
+
+    setState(() => isLoading = true);
+
     final email = emailController.text.trim();
-    DemoData.currentUserId = email;
-    DemoData.loadFromSupabase(email);
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => DashboardScreen(
-          themeNotifier: widget.themeNotifier,
-          email: email,
+    final password = passwordController.text;
+
+    try {
+      final user = isSignup
+          ? await AuthService.instance.register(
+              fullName: fullNameController.text.trim(),
+              email: email,
+              password: password,
+            )
+          : await AuthService.instance.login(
+              email: email,
+              password: password,
+            );
+
+      if (!mounted) return;
+
+      // Store the authenticated user's actual ID.
+      DemoData.currentUserId = user.id;
+
+      // Preserve the existing Supabase data-loading functionality.
+      DemoData.loadFromSupabase(user.id);
+
+      if (!mounted) return;
+
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => DashboardScreen(
+            themeNotifier: widget.themeNotifier,
+            email: user.email,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString()),
+          backgroundColor: Theme.of(context).colorScheme.error,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => isLoading = false);
+      }
+    }
   }
 
   @override
@@ -85,7 +135,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         },
                       ),
                     ),
+
                     const SizedBox(height: 20),
+
                     CircleAvatar(
                       radius: 42,
                       backgroundColor: colors.primary,
@@ -95,7 +147,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         size: 44,
                       ),
                     ),
+
                     const SizedBox(height: 22),
+
                     const Text(
                       'Privacy Preserving\nSmart Notes',
                       textAlign: TextAlign.center,
@@ -104,12 +158,16 @@ class _LoginScreenState extends State<LoginScreen> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+
                     const SizedBox(height: 8),
+
                     const Text(
                       'Smart note taking with privacy in mind',
                       textAlign: TextAlign.center,
                     ),
+
                     const SizedBox(height: 30),
+
                     Text(
                       isSignup ? 'Create Account' : 'Welcome Back',
                       style: const TextStyle(
@@ -117,28 +175,64 @@ class _LoginScreenState extends State<LoginScreen> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+
                     const SizedBox(height: 18),
+
+                    if (isSignup) ...[
+                      TextFormField(
+                        controller: fullNameController,
+                        textCapitalization: TextCapitalization.words,
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(
+                          labelText: 'Full Name',
+                          prefixIcon: Icon(Icons.person_outline),
+                        ),
+                        validator: (value) {
+                          if (!isSignup) return null;
+
+                          if (value == null || value.trim().isEmpty) {
+                            return 'Please enter your full name';
+                          }
+
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+
                     TextFormField(
                       controller: emailController,
                       keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
                       decoration: const InputDecoration(
                         labelText: 'Email address',
                         prefixIcon: Icon(Icons.email_outlined),
                       ),
                       validator: (value) {
-                        if (value == null || value.trim().isEmpty) {
+                        final email = value?.trim() ?? '';
+
+                        if (email.isEmpty) {
                           return 'Please enter your email';
                         }
-                        if (!value.contains('@')) {
+
+                        final emailPattern =
+                            RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+                        if (!emailPattern.hasMatch(email)) {
                           return 'Enter a valid email address';
                         }
+
                         return null;
                       },
                     ),
+
                     const SizedBox(height: 14),
+
                     TextFormField(
                       controller: passwordController,
                       obscureText: hidePassword,
+                      textInputAction: TextInputAction.done,
+                      onFieldSubmitted: (_) => authenticate(),
                       decoration: InputDecoration(
                         labelText: 'Password',
                         prefixIcon: const Icon(Icons.lock_outline),
@@ -156,38 +250,56 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
                       validator: (value) {
-                        if (value == null || value.length < 4) {
-                          return 'Password must have at least 4 characters';
+                        if (value == null || value.length < 6) {
+                          return 'Password must have at least 6 characters';
                         }
+
                         return null;
                       },
                     ),
+
                     const SizedBox(height: 22),
+
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
-                        onPressed: openDashboard,
-                        child: Text(
-                          isSignup ? 'Create Account' : 'Login',
-                        ),
+                        onPressed: isLoading ? null : authenticate,
+                        child: isLoading
+                            ? const SizedBox(
+                                height: 22,
+                                width: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Text(
+                                isSignup ? 'Create Account' : 'Login',
+                              ),
                       ),
                     ),
+
                     TextButton(
-                      onPressed: () {
-                        setState(() {
-                          isSignup = !isSignup;
-                        });
-                      },
+                      onPressed: isLoading
+                          ? null
+                          : () {
+                              setState(() {
+                                isSignup = !isSignup;
+                              });
+
+                              formKey.currentState?.reset();
+                              passwordController.clear();
+                            },
                       child: Text(
                         isSignup
                             ? 'Already have an account? Login'
                             : 'New user? Create an account',
                       ),
                     ),
+
                     const SizedBox(height: 12),
+
                     const Text(
-                      'Demo authentication only. This screen does not '
-                      'create or verify real user accounts.',
+                      'Your account is authenticated through the backend service.',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 12),
                     ),

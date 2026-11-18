@@ -8,6 +8,8 @@ class DemoNote {
     this.sessionId,
     this.userId,
     this.isSatisfactory,
+    this.docxUrl,
+    this.docxPath,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -19,6 +21,8 @@ class DemoNote {
   String title;
   String content;
   final String type;
+  String? docxUrl;
+  String? docxPath;
   final DateTime createdAt;
 }
 

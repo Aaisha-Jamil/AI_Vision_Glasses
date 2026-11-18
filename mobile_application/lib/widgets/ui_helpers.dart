@@ -5,6 +5,7 @@ import '../models/saved_input.dart';
 import '../screens/saved_notes_screen.dart';
 import '../services/api_config.dart';
 import '../services/audio_service.dart';
+import '../theme/app_theme.dart';
 
 void showMessage(BuildContext context, String message) {
   if (!context.mounted) return;
@@ -122,11 +123,11 @@ Future<void> showServerConfigDialog(BuildContext context) async {
       return StatefulBuilder(
         builder: (context, setState) {
           return AlertDialog(
-            title: const Row(
+            title: Row(
               children: [
-                Icon(Icons.router_outlined, color: Colors.teal),
-                SizedBox(width: 10),
-                Text('Backend Server IP'),
+                Icon(Icons.router_outlined, color: AppTheme.primary(context)),
+                const SizedBox(width: 10),
+                const Text('Backend Server IP'),
               ],
             ),
             content: SingleChildScrollView(
@@ -188,7 +189,7 @@ Future<void> showServerConfigDialog(BuildContext context) async {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
-                        color: testStatus!.startsWith('✅') ? Colors.green : Colors.red,
+                        color: testStatus!.startsWith('✅') ? AppTheme.success : AppTheme.danger,
                       ),
                     ),
                   ],
@@ -224,7 +225,7 @@ Future<void> showStorageQuotaExceededDialog(BuildContext context) async {
     builder: (dialogCtx) => AlertDialog(
       title: const Row(
         children: [
-          Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
+          Icon(Icons.warning_amber_rounded, color: AppTheme.danger, size: 28),
           SizedBox(width: 10),
           Expanded(child: Text('Storage Limit Reached (2/2)')),
         ],
@@ -237,7 +238,7 @@ Future<void> showStorageQuotaExceededDialog(BuildContext context) async {
       actions: [
         FilledButton(
           onPressed: () => Navigator.pop(dialogCtx),
-          style: FilledButton.styleFrom(backgroundColor: Colors.teal),
+          style: FilledButton.styleFrom(backgroundColor: AppTheme.primary(context)),
           child: const Text('Understood'),
         ),
       ],
@@ -259,11 +260,11 @@ Future<bool> showPostNoteGenerationRetentionDialog({
     context: context,
     barrierDismissible: false,
     builder: (dialogCtx) => AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
-          Icon(Icons.auto_awesome, color: Colors.teal),
-          SizedBox(width: 8),
-          Text('Document Generated'),
+          Icon(Icons.auto_awesome, color: AppTheme.primary(context)),
+          const SizedBox(width: 8),
+          const Text('Document Generated'),
         ],
       ),
       content: SizedBox(
@@ -285,14 +286,14 @@ Future<bool> showPostNoteGenerationRetentionDialog({
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.orange.withValues(alpha: 0.1),
+                color: AppTheme.warning.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                border: Border.all(color: AppTheme.warning.withValues(alpha: 0.3)),
               ),
               child: const Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.info_outline, size: 18, color: Colors.orange),
+                  Icon(Icons.info_outline, size: 18, color: AppTheme.warning),
                   SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -316,7 +317,7 @@ Future<bool> showPostNoteGenerationRetentionDialog({
           onPressed: () => Navigator.pop(dialogCtx, 'discard'),
           icon: const Icon(Icons.delete_outline, size: 16),
           label: const Text('Discard Inputs (Recommended)'),
-          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
         ),
       ],
     ),
@@ -332,7 +333,7 @@ Future<bool> showPostNoteGenerationRetentionDialog({
       builder: (confirmCtx) => AlertDialog(
         title: const Row(
           children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.red),
+            Icon(Icons.warning_amber_rounded, color: AppTheme.danger),
             SizedBox(width: 8),
             Text('Confirm Discard Inputs'),
           ],
@@ -353,9 +354,9 @@ Future<bool> showPostNoteGenerationRetentionDialog({
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 '• The generated document in Saved Notes will NOT be affected and remains safely stored.',
-                style: TextStyle(fontSize: 13, color: Colors.teal, fontWeight: FontWeight.bold),
+                style: TextStyle(fontSize: 13, color: AppTheme.primary(context), fontWeight: FontWeight.bold),
               ),
             ],
           ),
@@ -369,7 +370,7 @@ Future<bool> showPostNoteGenerationRetentionDialog({
             onPressed: () => Navigator.pop(confirmCtx, true),
             icon: const Icon(Icons.delete_forever),
             label: const Text('Confirm Discard'),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
           ),
         ],
       ),
@@ -432,6 +433,3 @@ Future<bool> showPostNoteGenerationRetentionDialog({
     return true;
   }
 }
-
-
-

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/board_image_item.dart';
+import '../theme/app_theme.dart';
 import 'image_loader.dart';
 
 class BoardPreviewWidget extends StatelessWidget {
@@ -69,6 +70,7 @@ class BoardPreviewWidget extends StatelessWidget {
   }
 
   Widget _buildVisualImage(BuildContext context, bool isDark) {
+    final theme = Theme.of(context);
     final hasRemote = item.remoteImageUrl != null && item.remoteImageUrl!.isNotEmpty;
     final hasLocal = localImageExists(item.localImagePath);
     final hasRealImage = hasRemote || hasLocal;
@@ -77,10 +79,10 @@ class BoardPreviewWidget extends StatelessWidget {
       height: compact ? 140 : 210,
       width: double.infinity,
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1E282D) : const Color(0xFF2C3E50),
+        color: isDark ? AppTheme.boardDark : AppTheme.deepForest,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: Colors.teal.withValues(alpha: 0.5),
+          color: theme.colorScheme.primary.withValues(alpha: 0.6),
           width: 1.5,
         ),
         boxShadow: [
@@ -145,18 +147,18 @@ class BoardPreviewWidget extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: Colors.teal.withValues(alpha: 0.3),
+                        color: theme.colorScheme.primary.withValues(alpha: 0.35),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.camera_alt, color: Colors.tealAccent, size: 14),
-                          SizedBox(width: 4),
+                          Icon(Icons.camera_alt, color: isDark ? AppTheme.softSage : AppTheme.warmCream, size: 14),
+                          const SizedBox(width: 4),
                           Text(
                             'AI GLASSES CAPTURE',
                             style: TextStyle(
-                              color: Colors.tealAccent,
+                              color: isDark ? AppTheme.softSage : AppTheme.warmCream,
                               fontSize: 10,
                               fontWeight: FontWeight.bold,
                               letterSpacing: 0.5,
@@ -206,7 +208,7 @@ class BoardPreviewWidget extends StatelessWidget {
                           const Text(
                             r'L_privacy = \lambda \cdot ||I_{blur} - I_{orig}||',
                             style: TextStyle(
-                              color: Colors.amberAccent,
+                              color: AppTheme.warmSand,
                               fontFamily: 'monospace',
                               fontSize: 11,
                               fontWeight: FontWeight.bold,
@@ -223,12 +225,12 @@ class BoardPreviewWidget extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.65),
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.tealAccent.withValues(alpha: 0.4)),
+                        border: Border.all(color: (isDark ? AppTheme.softSage : AppTheme.warmSand).withValues(alpha: 0.5)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.shield_outlined, color: Colors.tealAccent, size: 18),
+                          Icon(Icons.shield_outlined, color: isDark ? AppTheme.softSage : AppTheme.warmSand, size: 18),
                           const SizedBox(width: 8),
                           Text(
                             item.peopleDetected > 0
@@ -268,7 +270,7 @@ class BoardPreviewWidget extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1B2428) : const Color(0xFFF4F7F9),
+        color: isDark ? AppTheme.surfaceDark : AppTheme.paleSea,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: theme.colorScheme.outlineVariant,
@@ -279,7 +281,7 @@ class BoardPreviewWidget extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.text_snippet_outlined, color: Colors.teal, size: 18),
+              Icon(Icons.text_snippet_outlined, color: theme.colorScheme.primary, size: 18),
               const SizedBox(width: 6),
               const Expanded(
                 child: Text(
@@ -290,12 +292,12 @@ class BoardPreviewWidget extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.green.withValues(alpha: 0.15),
+                  color: AppTheme.success.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Text(
                   '98% match',
-                  style: TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold),
+                  style: TextStyle(color: AppTheme.success, fontSize: 10, fontWeight: FontWeight.bold),
                 ),
               ),
             ],
@@ -396,7 +398,7 @@ class BoardPreviewWidget extends StatelessWidget {
           children: [
             Icon(
               icon,
-              color: isSelected ? theme.colorScheme.primary : Colors.grey,
+              color: isSelected ? theme.colorScheme.primary : AppTheme.mutedText,
               size: 22,
             ),
             const SizedBox(width: 12),
@@ -414,7 +416,7 @@ class BoardPreviewWidget extends StatelessWidget {
                   ),
                   Text(
                     subtitle,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    style: const TextStyle(fontSize: 12, color: AppTheme.mutedText),
                   ),
                 ],
               ),
@@ -425,7 +427,7 @@ class BoardPreviewWidget extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: isSelected ? theme.colorScheme.primary : Colors.grey,
+                  color: isSelected ? theme.colorScheme.primary : AppTheme.mutedText,
                   width: 2,
                 ),
               ),

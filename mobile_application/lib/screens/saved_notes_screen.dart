@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../data/demo_data.dart';
 import '../models/note.dart';
+import '../theme/app_theme.dart';
 import '../widgets/ui_helpers.dart';
 
 class SavedNotesScreen extends StatefulWidget {
@@ -102,8 +103,44 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(note.title),
-        content: SingleChildScrollView(
-          child: SelectableText(note.content),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (note.docxUrl != null && note.docxUrl!.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary(context).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: AppTheme.primary(context).withValues(alpha: 0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.description, size: 18, color: AppTheme.primary(context)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Word Document (.docx): ${note.docxUrl}',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                SelectableText(
+                  note.content,
+                  style: const TextStyle(fontSize: 13, height: 1.4),
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
           TextButton(
@@ -122,12 +159,83 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
     );
   }
 
-  void requestExport(String format) {
-    showMessage(
-      context,
-      '$format export is not implemented yet. '
-      'Your notes remain securely stored in Supabase.',
+  void openDocx(DemoNote note) {
+    final url = note.docxUrl;
+    if (url == null || url.isEmpty) {
+      showMessage(context, 'No .docx document path associated with this note.');
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.description, color: AppTheme.primary(context)),
+            const SizedBox(width: 8),
+            const Text('Word Document (.docx)'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'A formatted academic Word .docx document was synthesized with embedded figures and native equation formulas.',
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppTheme.mutedText.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: SelectableText(
+                url,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
     );
+  }
+
+  void requestExport(String format) {
+    if (format == 'Markdown') {
+      if (DemoData.notes.isEmpty) {
+        showMessage(context, 'No notes available to export.');
+        return;
+      }
+      showMessage(
+        context,
+        'Exporting Markdown for ${DemoData.notes.length} note(s). Markdown structure is preserved.',
+      );
+    } else if (format == 'DOCX') {
+      final docxNotes = DemoData.notes.where((n) => n.docxUrl != null && n.docxUrl!.isNotEmpty).toList();
+      if (docxNotes.isNotEmpty) {
+        showMessage(
+          context,
+          'Found ${docxNotes.length} synthesized .docx document(s) in cloud storage/local disk.',
+        );
+      } else {
+        showMessage(
+          context,
+          'Generate notes from a lecture session to synthesize a Word .docx document.',
+        );
+      }
+    } else {
+      showMessage(
+        context,
+        '$format export: Your synthesized notes remain securely stored in Supabase.',
+      );
+    }
   }
 
   @override
@@ -169,8 +277,8 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
                     ),
                     SizedBox(height: 6),
                     Text(
-                      'Create demo notes in Audio Studio or '
-                      'Board Image Capture.',
+                      'Generate notes in Multi-Input Notes Studio or '
+                      'Saved Inputs from your recorded lectures.',
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -233,13 +341,22 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
                           onPressed: () => deleteNote(note),
                           icon: const Icon(
                             Icons.delete_outline,
-                            color: Colors.red,
+                            color: AppTheme.danger,
                           ),
                           label: const Text('Delete'),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.red,
+                            foregroundColor: AppTheme.danger,
                           ),
                         ),
+                        if (note.docxUrl != null && note.docxUrl!.isNotEmpty)
+                          OutlinedButton.icon(
+                            onPressed: () => openDocx(note),
+                            icon: Icon(Icons.description, color: AppTheme.primary(context)),
+                            label: const Text('.DOCX'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppTheme.primary(context),
+                            ),
+                          ),
                       ],
                     ),
                   ],

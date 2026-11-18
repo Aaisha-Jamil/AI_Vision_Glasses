@@ -3,6 +3,7 @@ import '../models/board_image_item.dart';
 import '../models/note.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/notes_service.dart';
 import '../services/supabase_service.dart';
 
 class DemoData {
@@ -69,16 +70,10 @@ class DemoData {
       }
       refreshCount();
 
-      // 3. If no sessions were loaded at all, seed a sample workshop session
-      //    so the user always sees at least one card with Studio View.
-      if (savedInputs.isEmpty) {
-        _seedSampleWorkshopSession();
-      }
+      // 3. User sessions loaded from Supabase. If none exist yet,
+      //    savedInputs remains empty until the user records a real session.
     } catch (_) {
-      // Offline fallback: seed sample if empty
-      if (savedInputs.isEmpty) {
-        _seedSampleWorkshopSession();
-      }
+      // Offline fallback: keep existing local sessions
     } finally {
       isSyncing = false;
     }
@@ -328,6 +323,14 @@ class DemoData {
         for (final line in input.audioTranscripts) {
           buffer.writeln(line);
         }
+      } else if (input.transcriptLines.isNotEmpty) {
+        for (final line in input.transcriptLines) {
+          if (!line.isFlagged) {
+            buffer.writeln('[${line.timestamp}] ${line.text}');
+          }
+        }
+      } else if (input.content.trim().isNotEmpty) {
+        buffer.writeln(input.content.trim());
       } else {
         buffer.writeln('No audio transcripts captured.');
       }
@@ -375,6 +378,78 @@ class DemoData {
     return newNote;
   }
 
+  /// Asynchronously generates academic lecture notes for [input] by connecting to the
+  /// Python Notes Generation module via NotesService. Falls back seamlessly to
+  /// the synchronous synthesis engine if the backend is offline.
+  static Future<DemoNote?> generateAiNotesForInput(SavedInput input) async {
+    if (input.notesGenerated) return null;
+
+    final sessionData = {
+      'session_id': input.sessionId,
+      'title': input.title,
+      'user_id': input.userId,
+      'audio_duration': input.audioDuration,
+      'audio_chunks': input.transcriptLines.isNotEmpty
+          ? input.transcriptLines
+              .map((l) => {
+                    'chunk_id': l.id,
+                    'start_timestamp': l.secondTrigger.toDouble(),
+                    'end_timestamp': (l.secondTrigger + 5).toDouble(),
+                    'transcript_text': l.text,
+                    'edited_text': l.text,
+                    'is_flagged_noise': l.isFlagged,
+                    'user_override_status': l.isFlagged ? 'PENDING' : 'KEEP',
+                  })
+              .toList()
+          : (input.audioTranscripts.isNotEmpty
+              ? input.audioTranscripts
+              : (input.content.trim().isNotEmpty ? [input.content.trim()] : [])),
+      'image_snapshots': input.capturedImages
+          .map((img) => {
+                'snapshot_id': img.snapshotId ?? 'snap_${img.id}',
+                'sequence_timestamp': (img.capturedAtSecond ?? 0).toDouble(),
+                'captured_timestamp': (img.capturedAtSecond ?? 0).toDouble(),
+                'blurred_image_url': img.remoteImageUrl ?? img.localImagePath ?? '',
+                'note_inclusion_preference': img.option == BoardImageOption.imageAsIs
+                    ? 'IMAGE_ONLY'
+                    : img.option == BoardImageOption.ocr
+                        ? 'OCR_TEXT_ONLY'
+                        : 'BOTH',
+                'ocr_text': img.ocrText,
+                'confidence_score': img.confidenceScore ?? 0.95,
+              })
+          .toList(),
+    };
+
+    try {
+      final res = await NotesService().generateNotes(
+        sessionId: input.sessionId,
+        userId: input.userId,
+        sessionData: sessionData,
+      );
+
+      if (res['status'] == 'success' && res['markdown_content'] != null) {
+        final markdown = res['markdown_content'] as String;
+        final docxUrl = (res['docx_url'] as String?) ?? (res['docx_path'] as String?);
+
+        final newNote = addNote(
+          title: '${input.title} - Comprehensive Notes',
+          content: markdown,
+          type: 'Workshop Session Notes',
+          sessionId: input.sessionId,
+          userId: input.userId,
+          docxUrl: docxUrl,
+        );
+
+        input.notesGenerated = true;
+        return newNote;
+      }
+    } catch (_) {}
+
+    // Graceful offline fallback
+    return generateNotesForInput(input);
+  }
+
   /// Scenario 1: Applies retention decision after document has been generated:
   /// - If [discardInputs] is true (or [deleteNow] is true): Permanently deletes the raw session
   ///   inputs from Supabase, while ensuring the generated document in Saved Notes is completely preserved.
@@ -419,6 +494,7 @@ class DemoData {
     required String type,
     String? sessionId,
     String? userId,
+    String? docxUrl,
   }) {
     final sid = sessionId ?? 'sess_direct_${DateTime.now().millisecondsSinceEpoch}';
     final uid = userId ?? currentUserId;
@@ -432,6 +508,7 @@ class DemoData {
       title: title,
       content: content,
       type: type,
+      docxUrl: docxUrl,
     );
     notes.insert(0, note);
     refreshCount();

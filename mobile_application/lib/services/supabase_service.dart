@@ -322,7 +322,11 @@ class SupabaseService {
           'snapshot_id': snapId,
           'session_id': sessionId,
           'timestamp': (img.capturedAtSecond ?? 0).toDouble(),
+          'sequence_timestamp': (img.capturedAtSecond ?? 0).toDouble(),
+          'captured_timestamp': (img.capturedAtSecond ?? 0).toDouble(),
           'blurred_filepath': img.remoteImageUrl ?? img.localImagePath ?? 'local_capture',
+          'blurred_image_url': img.remoteImageUrl ?? img.localImagePath ?? '',
+          'status': 'APPROVED',
           'note_inclusion_preference': img.option == BoardImageOption.imageAsIs
               ? 'IMAGE_ONLY'
               : img.option == BoardImageOption.ocr
@@ -590,6 +594,7 @@ class SupabaseService {
             content: row['markdown_content'] as String? ?? '',
             type: 'Workshop Session Notes',
             isSatisfactory: row['is_satisfactory'] as bool?,
+            docxUrl: row['docx_filepath'] as String?,
             createdAt: createdAt,
           ),
         );
@@ -623,6 +628,7 @@ class SupabaseService {
         'title': note.title,
         'markdown_content': note.content,
         'is_satisfactory': isSatisfactory,
+        if (note.docxUrl != null) 'docx_filepath': note.docxUrl,
       };
 
       final response = await http.post(

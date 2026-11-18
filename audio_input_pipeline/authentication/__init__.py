@@ -1,0 +1,1 @@
+"""Authentication API and provider contracts for the AI Vision Glasses backend."""

@@ -7,6 +7,7 @@ import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'saved_notes_screen.dart';
 import 'audio_studio_screen.dart';
+import '../theme/app_theme.dart';
 
 enum StudioViewTab {
   synchronizedFeed,
@@ -30,6 +31,7 @@ class SavedStudioSessionScreen extends StatefulWidget {
 }
 
 class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
+  Color get primaryCol => AppTheme.primary(context);
   StudioViewTab _currentTab = StudioViewTab.synchronizedFeed;
 
   SavedInput get input => widget.input;
@@ -52,7 +54,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
             children: [
               Icon(
                 line.isFlagged ? Icons.warning_amber_rounded : Icons.edit_note,
-                color: line.isFlagged ? Colors.red : Colors.teal,
+                color: line.isFlagged ? AppTheme.danger : primaryCol,
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -74,7 +76,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.12),
+                    color: primaryCol.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -155,8 +157,13 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
     showMessage(context, 'Transcript line deleted from Supabase.');
   }
 
+  
   Future<void> generateNotes() async {
-    final note = DemoData.generateNotesForInput(input);
+    final note = await DemoData.generateAiNotesForInput(input);
+
+    // Check karein ke screen abhi active hai.
+    if (!mounted) return;
+
     setState(() {});
 
     if (note == null) {
@@ -164,11 +171,8 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       return;
     }
 
-    if (!mounted) return;
-
     // Scenario 1: Document Has Been Generated
-    // Prompt Keep or Discard, recommend discard due to limited storage,
-    // show confirmation dialog, and retain the generated document safely.
+    // Prompt Keep or Discard.
     await showPostNoteGenerationRetentionDialog(
       context: context,
       session: input,
@@ -178,6 +182,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       },
     );
   }
+
 
   Future<void> discardInputsNow() async {
     final confirmed = await askConfirmation(
@@ -237,7 +242,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
             ),
             const Text(
               'Multi-Input Notes Studio Inspector',
-              style: TextStyle(fontSize: 11, color: Colors.teal),
+              style: TextStyle(fontSize: 11, color: AppTheme.slateGreen),
             ),
           ],
         ),
@@ -254,7 +259,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           ),
           IconButton(
             tooltip: 'Delete Session',
-            icon: const Icon(Icons.delete_outline, color: Colors.red),
+            icon: const Icon(Icons.delete_outline, color: AppTheme.danger),
             onPressed: deleteSession,
           ),
         ],
@@ -268,10 +273,10 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               padding: const EdgeInsets.all(22),
               child: Column(
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.graphic_eq,
                     size: 64,
-                    color: Colors.teal,
+                    color: primaryCol,
                   ),
                   const SizedBox(height: 12),
                   Text(
@@ -292,20 +297,20 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
-                          color: Colors.teal.withValues(alpha: 0.15),
+                          color: primaryCol.withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: Colors.teal.withValues(alpha: 0.3)),
+                          border: Border.all(color: primaryCol.withValues(alpha: 0.3)),
                         ),
-                        child: const Row(
+                        child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(Icons.check_circle_outline,
-                                size: 14, color: Colors.teal),
-                            SizedBox(width: 5),
+                                size: 14, color: primaryCol),
+                            const SizedBox(width: 5),
                             Text(
                               'STUDIO CAPTURE COMPLETED',
                               style: TextStyle(
-                                color: Colors.teal,
+                                color: primaryCol,
                                 fontSize: 11,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -349,7 +354,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   Text(
                     'Viewing captured session inputs stored in Supabase PostgreSQL.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 12, color: AppTheme.mutedText),
                   ),
                 ],
               ),
@@ -411,11 +416,11 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.cloud_done_outlined, size: 18, color: Colors.teal),
-                      SizedBox(width: 8),
-                      Text(
+                      Icon(Icons.cloud_done_outlined, size: 18, color: primaryCol),
+                      const SizedBox(width: 8),
+                      const Text(
                         'Supabase Cloud Storage & Retention',
                         style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                       ),
@@ -426,7 +431,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                     children: [
                       Icon(
                         input.notesGenerated ? Icons.check_circle : Icons.pending_outlined,
-                        color: input.notesGenerated ? Colors.green : Colors.orange,
+                        color: input.notesGenerated ? AppTheme.success : AppTheme.warning,
                         size: 16,
                       ),
                       const SizedBox(width: 6),
@@ -444,8 +449,8 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                             fontSize: 11,
                             fontWeight: FontWeight.bold,
                             color: (input.daysRemaining ?? 0) <= 1
-                                ? Colors.red
-                                : Colors.orange,
+                                ? AppTheme.danger
+                                : AppTheme.warning,
                           ),
                         ),
                     ],
@@ -453,7 +458,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   const SizedBox(height: 8),
                   Text(
                     'Session ID: ${input.sessionId} • User: ${input.userId}',
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                    style: const TextStyle(fontSize: 11, color: AppTheme.mutedText),
                   ),
                 ],
               ),
@@ -473,7 +478,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   icon: const Icon(Icons.auto_awesome),
                   label: const Text('Generate Comprehensive Notes'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.teal,
+                    backgroundColor: AppTheme.slateGreen,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                   ),
@@ -492,8 +497,8 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   icon: const Icon(Icons.edit_note, size: 18),
                   label: const Text('Resume in Studio'),
                   style: FilledButton.styleFrom(
-                    backgroundColor: Colors.teal.withValues(alpha: 0.18),
-                    foregroundColor: Colors.teal,
+                    backgroundColor: AppTheme.slateGreen.withValues(alpha: 0.18),
+                    foregroundColor: AppTheme.slateGreen,
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                   ),
                 ),
@@ -504,7 +509,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   icon: const Icon(Icons.delete_sweep, size: 18),
                   label: const Text('Discard Inputs Now'),
                   style: FilledButton.styleFrom(
-                    backgroundColor: Colors.red.shade700,
+                    backgroundColor: AppTheme.dangerDark,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                   ),
@@ -529,7 +534,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.teal : Colors.transparent,
+          color: isSelected ? AppTheme.slateGreen : Colors.transparent,
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
@@ -538,7 +543,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
             Icon(
               icon,
               size: 14,
-              color: isSelected ? Colors.white : Colors.grey,
+              color: isSelected ? Colors.white : AppTheme.mutedText,
             ),
             const SizedBox(width: 4),
             Flexible(
@@ -630,7 +635,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           children: [
             Row(
               children: [
-                const Icon(Icons.sync_alt, color: Colors.teal),
+                const Icon(Icons.sync_alt, color: AppTheme.slateGreen),
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
@@ -641,13 +646,13 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.12),
+                    color: AppTheme.slateGreen.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
                     '${items.length} EVENTS',
                     style: const TextStyle(
-                      color: Colors.teal,
+                      color: AppTheme.slateGreen,
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
                     ),
@@ -685,7 +690,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           children: [
             Row(
               children: [
-                const Icon(Icons.subject, color: Colors.teal),
+                const Icon(Icons.subject, color: AppTheme.slateGreen),
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
@@ -696,13 +701,13 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.12),
+                    color: AppTheme.slateGreen.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
                     '${lines.isNotEmpty ? lines.length : input.audioTranscripts.length} LINES',
                     style: const TextStyle(
-                      color: Colors.teal,
+                      color: AppTheme.slateGreen,
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
                     ),
@@ -715,18 +720,18 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.red.withValues(alpha: 0.08),
+                  color: AppTheme.danger.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.red.withValues(alpha: 0.2)),
+                  border: Border.all(color: AppTheme.danger.withValues(alpha: 0.2)),
                 ),
                 child: const Row(
                   children: [
-                    Icon(Icons.warning_amber_rounded, color: Colors.red, size: 16),
+                    Icon(Icons.warning_amber_rounded, color: AppTheme.danger, size: 16),
                     SizedBox(width: 6),
                     Expanded(
                       child: Text(
                         'Flagged noise lines are highlighted in red below. Use Keep, Edit, or Delete to manage.',
-                        style: TextStyle(fontSize: 11, color: Colors.red),
+                        style: TextStyle(fontSize: 11, color: AppTheme.danger),
                       ),
                     ),
                   ],
@@ -767,7 +772,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           children: [
             Row(
               children: [
-                const Icon(Icons.photo_library_outlined, color: Colors.teal),
+                const Icon(Icons.photo_library_outlined, color: AppTheme.slateGreen),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -788,7 +793,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 child: const Center(
                   child: Text(
                     'No board images attached to this session.',
-                    style: TextStyle(color: Colors.grey),
+                    style: TextStyle(color: AppTheme.mutedText),
                   ),
                 ),
               )
@@ -801,7 +806,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: Colors.teal.withValues(alpha: 0.4),
+                      color: AppTheme.slateGreen.withValues(alpha: 0.4),
                       width: 1.5,
                     ),
                   ),
@@ -812,12 +817,12 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: Colors.teal.withValues(alpha: 0.12),
+                          color: AppTheme.slateGreen.withValues(alpha: 0.12),
                           borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.camera_alt_outlined, size: 16, color: Colors.teal),
+                            const Icon(Icons.camera_alt_outlined, size: 16, color: AppTheme.slateGreen),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
@@ -825,14 +830,14 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                                 style: const TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 13,
-                                  color: Colors.teal,
+                                  color: AppTheme.slateGreen,
                                 ),
                               ),
                             ),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: Colors.teal.withValues(alpha: 0.2),
+                                color: AppTheme.slateGreen.withValues(alpha: 0.2),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
@@ -840,7 +845,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                                 style: const TextStyle(
                                   fontSize: 10,
                                   fontWeight: FontWeight.bold,
-                                  color: Colors.teal,
+                                  color: AppTheme.slateGreen,
                                 ),
                               ),
                             ),
@@ -859,6 +864,19 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                         child: BoardPreviewWidget(
                           item: img,
                           compact: false,
+                          showOptionsSelector: true,
+                          onOptionChanged: (newOpt) {
+                            setState(() => img.option = newOpt);
+                            DemoData.addSessionInput(
+                              title: input.title,
+                              audioTranscripts: input.audioTranscripts,
+                              capturedImages: input.capturedImages,
+                              audioDuration: input.audioDuration ?? '00:00',
+                              sessionId: input.sessionId,
+                              userId: input.userId,
+                              allTranscriptLines: input.transcriptLines,
+                            );
+                          },
                         ),
                       ),
                     ],
@@ -880,12 +898,12 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: Colors.teal.withValues(alpha: 0.45),
+          color: AppTheme.slateGreen.withValues(alpha: 0.45),
           width: 1.5,
         ),
         color: isDark
-            ? Colors.teal.withValues(alpha: 0.06)
-            : Colors.teal.withValues(alpha: 0.03),
+            ? AppTheme.slateGreen.withValues(alpha: 0.06)
+            : AppTheme.slateGreen.withValues(alpha: 0.03),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -893,12 +911,12 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.teal.withValues(alpha: 0.12),
+              color: AppTheme.slateGreen.withValues(alpha: 0.12),
               borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
             ),
             child: Row(
               children: [
-                const Icon(Icons.camera_alt_outlined, size: 15, color: Colors.teal),
+                const Icon(Icons.camera_alt_outlined, size: 15, color: AppTheme.slateGreen),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -906,14 +924,14 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 12,
-                      color: Colors.teal,
+                      color: AppTheme.slateGreen,
                     ),
                   ),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Colors.teal.withValues(alpha: 0.2),
+                    color: AppTheme.slateGreen.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -921,7 +939,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                     style: const TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
-                      color: Colors.teal,
+                      color: AppTheme.slateGreen,
                     ),
                   ),
                 ),
@@ -966,10 +984,10 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF381A20) : const Color(0xFFFFEBEE),
+        color: isDark ? AppTheme.dangerSurfaceDark : AppTheme.dangerSurfaceLight,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: isDark ? Colors.red.shade700 : Colors.red.shade300,
+          color: isDark ? AppTheme.dangerDark : AppTheme.dangerSoft,
           width: 1.5,
         ),
       ),
@@ -981,7 +999,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.red.withValues(alpha: 0.18),
+                  color: AppTheme.danger.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
@@ -990,7 +1008,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                     fontFamily: 'monospace',
                     fontSize: 11,
                     fontWeight: FontWeight.bold,
-                    color: isDark ? Colors.red.shade200 : Colors.red.shade800,
+                    color: isDark ? AppTheme.dangerLight : AppTheme.dangerDeep,
                   ),
                 ),
               ),
@@ -998,7 +1016,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.red,
+                  color: AppTheme.danger,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Row(
@@ -1023,7 +1041,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 style: TextStyle(
                   fontSize: 11,
                   fontStyle: FontStyle.italic,
-                  color: isDark ? Colors.red.shade200 : Colors.red.shade700,
+                  color: isDark ? AppTheme.dangerLight : AppTheme.dangerDark,
                 ),
               ),
             ],
@@ -1035,7 +1053,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               fontSize: 13,
               height: 1.4,
               fontWeight: FontWeight.w500,
-              color: isDark ? Colors.white : Colors.black87,
+              color: isDark ? Colors.white : AppTheme.ink,
             ),
           ),
           const SizedBox(height: 10),
@@ -1044,10 +1062,10 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
             children: [
               OutlinedButton.icon(
                 onPressed: () => keepFlaggedLine(line),
-                icon: const Icon(Icons.check, size: 14, color: Colors.teal),
-                label: const Text('Keep', style: TextStyle(color: Colors.teal, fontSize: 12)),
+                icon: const Icon(Icons.check, size: 14, color: AppTheme.slateGreen),
+                label: const Text('Keep', style: TextStyle(color: AppTheme.slateGreen, fontSize: 12)),
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.teal),
+                  side: const BorderSide(color: AppTheme.slateGreen),
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
                 ),
@@ -1055,10 +1073,10 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
               const SizedBox(width: 8),
               OutlinedButton.icon(
                 onPressed: () => editTranscriptLine(line),
-                icon: const Icon(Icons.edit_outlined, size: 14, color: Colors.blue),
-                label: const Text('Edit', style: TextStyle(color: Colors.blue, fontSize: 12)),
+                icon: const Icon(Icons.edit_outlined, size: 14, color: AppTheme.info),
+                label: const Text('Edit', style: TextStyle(color: AppTheme.info, fontSize: 12)),
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.blue),
+                  side: const BorderSide(color: AppTheme.info),
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
                 ),
@@ -1069,7 +1087,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 icon: const Icon(Icons.delete_outline, size: 14, color: Colors.white),
                 label: const Text('Delete', style: TextStyle(color: Colors.white, fontSize: 12)),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
+                  backgroundColor: AppTheme.danger,
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   minimumSize: const Size(0, 32),
                 ),
@@ -1086,7 +1104,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: isDark ? Colors.white.withValues(alpha: 0.03) : const Color(0xFFF8FAFB),
+        color: isDark ? Colors.white.withValues(alpha: 0.03) : AppTheme.paleSea,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
@@ -1119,7 +1137,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+            icon: const Icon(Icons.edit_outlined, size: 16, color: AppTheme.mutedText),
             tooltip: 'Edit line',
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
@@ -1143,7 +1161,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
             decoration: BoxDecoration(
-              color: Colors.teal.withValues(alpha: 0.12),
+              color: AppTheme.slateGreen.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
@@ -1152,7 +1170,7 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
                 fontFamily: 'monospace',
                 fontSize: 10,
                 fontWeight: FontWeight.bold,
-                color: Colors.teal,
+                color: AppTheme.slateGreen,
               ),
             ),
           ),

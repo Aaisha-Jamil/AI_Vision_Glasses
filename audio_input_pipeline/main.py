@@ -34,10 +34,18 @@ import semantic
 import storage
 from audio_pipeline import AudioPipeline
 
+from authentication.routes import router as auth_router
+from feedback.routes import router as feedback_router
+
 # Bridge Image/Vision Pipeline components
 IMAGE_DIR = Path(__file__).resolve().parent.parent / "Image_input_pipeline"
 if str(IMAGE_DIR) not in sys.path:
     sys.path.insert(0, str(IMAGE_DIR))
+
+# Bridge Notes Generation Subsystem
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 try:
     from model import PrivacyModel
@@ -50,6 +58,11 @@ except Exception as _e:
     enhance_slide = None
     ocr = None
     approve_store = None
+
+try:
+    import notes_generation
+except Exception as _e:
+    notes_generation = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
@@ -123,6 +136,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Register Authentication and Feedback API routes
+app.include_router(auth_router)
+app.include_router(feedback_router)
+
 # Flutter web (flutter run -d chrome) is served from another port, so the browser
 # needs CORS for the REST calls. Mobile builds don't need it.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -189,6 +206,7 @@ def health():
         "audio_storage": "supabase" if storage.ENABLED else "local",
         "vision_model": "yolov8_loaded" if privacy_model_instance is not None else "bypass",
         "ocr_available": ocr is not None,
+        "notes_generation_available": notes_generation is not None,
     }
 
 
@@ -503,6 +521,59 @@ async def update_snapshot_preference(snapshot_id: str, body: SnapshotPreferenceR
         except Exception as e:
             log.warning("Failed updating preference in Supabase: %s", e)
     return {"snapshot_id": snapshot_id, "note_inclusion_preference": pref, "status": "UPDATED"}
+
+
+# ==============================================================================
+# Notes Generation REST Endpoints
+# ==============================================================================
+
+class GenerateNotesRequest(BaseModel):
+    session_id: str
+    user_id: str = "default_user"
+    session_data: dict | None = None
+
+
+@app.post("/api/v1/notes/generate")
+async def generate_notes_endpoint(body: GenerateNotesRequest):
+    """
+    Synthesizes academic lecture notes from transcribed audio chunks and board snapshots.
+    Integrates Gemini AI multimodal synthesis, builds styled Word .docx,
+    uploads to Supabase Storage, and saves record to public.generated_notes.
+    """
+    if notes_generation is None:
+        raise HTTPException(500, "Notes generation module not available on server.")
+
+    result = await asyncio.to_thread(
+        notes_generation.generate_notes_for_session,
+        body.session_id,
+        body.user_id,
+        body.session_data,
+    )
+    return result
+
+
+@app.get("/api/v1/notes/session/{session_id}")
+async def get_session_notes_endpoint(session_id: str):
+    """Fetches generated notes record for a given session."""
+    if notes_generation is not None:
+        note = await asyncio.to_thread(notes_generation.get_note_by_session, session_id)
+        if note:
+            return note
+    raise HTTPException(404, f"No generated notes found for session '{session_id}'")
+
+
+@app.get("/api/v1/notes/{session_id}/docx")
+async def download_note_docx(session_id: str):
+    """Downloads or streams the generated Word .docx document for a session."""
+    for d in [Path.home() / "Desktop", Path.home() / "Documents", ROOT_DIR / "generated_notes_docs"]:
+        candidate = d / f"{session_id}_notes.docx"
+        if candidate.exists():
+            return FileResponse(
+                path=candidate,
+                filename=f"{session_id}_notes.docx",
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+    raise HTTPException(404, f"DOCX file for session '{session_id}' not found.")
 
 
 @app.websocket("/ws/transcript")
