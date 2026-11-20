@@ -15,6 +15,7 @@ load_dotenv()  # before project imports: modules read their settings at import t
 import asyncio
 import logging
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,7 +35,10 @@ import semantic
 import storage
 from audio_pipeline import AudioPipeline
 
+from fastapi import Depends
+from authentication.dependencies import AUTH_REQUIRED, get_request_user, user_from_token
 from authentication.routes import router as auth_router
+from authentication.schemas import AuthenticatedUser
 from feedback.routes import router as feedback_router
 
 # Bridge Image/Vision Pipeline components
@@ -69,20 +73,30 @@ log = logging.getLogger("main")
 
 
 class ConnectionManager:
-    """Keeps track of connected WebSocket clients and pushes JSON to all of them."""
+    """Keeps track of connected WebSocket clients and pushes each session's events only
+    to its owner. A client connected without a token (AUTH_REQUIRED=false) gets all."""
 
     def __init__(self):
-        self.clients: set[WebSocket] = set()
+        self.clients: dict[WebSocket, str | None] = {}  # ws -> user id (None = no token)
+        self.owners: dict[str, str | None] = {}          # session_id -> owner user id
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket, user_id: str | None = None):
         await ws.accept()
-        self.clients.add(ws)
+        self.clients[ws] = user_id
 
     def disconnect(self, ws: WebSocket):
-        self.clients.discard(ws)
+        self.clients.pop(ws, None)
+
+    def _receives(self, client_user: str | None, message: dict) -> bool:
+        if client_user is None:
+            return not AUTH_REQUIRED
+        owner = self.owners.get(message.get("session_id"))
+        return owner is not None and owner == client_user
 
     async def broadcast(self, message: dict):
-        for ws in list(self.clients):
+        for ws, client_user in list(self.clients.items()):
+            if not self._receives(client_user, message):
+                continue
             try:
                 await ws.send_json(message)
             except Exception:
@@ -95,14 +109,20 @@ pipeline = AudioPipeline(broadcast=manager.broadcast)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # The embedding model (~30 s+, mostly importing torch) and the database connection
+    # load in parallel; the server reports ready only when both are done, so the first
+    # session start doesn't hang while the app already thinks the server is up.
+    t0 = time.perf_counter()
+    model_task = asyncio.create_task(asyncio.to_thread(semantic.get_model))
     try:
-        db.init_db()
-        log.info("Supabase database connection initialized successfully.")
+        # switches to in-memory mode (and logs why) if Postgres stays unusable
+        await asyncio.to_thread(db.init_db)
     except Exception as e:
-        log.warning("Database connection failed or not configured (%s). Server starting in memory/streaming mode.", e)
-    # Load the embedding model in the background so startup stays fast;
-    # a session started before it finishes just waits on the model lock.
-    asyncio.create_task(asyncio.to_thread(semantic.get_model))
+        log.error("Database init raised unexpectedly (%s).", e)
+    if not db.is_memory_mode():
+        log.info("Supabase database connection initialized successfully.")
+    await model_task
+    log.info("Embedding model ready in %.1f s - server ready.", time.perf_counter() - t0)
 
     # 7-day auto-deletion background loop: purges expired completed session inputs
     async def _periodic_retention_cleanup():
@@ -137,6 +157,22 @@ app = FastAPI(
 )
 
 # Register Authentication and Feedback API routes
+import os
+from authentication.dependencies import set_auth_provider
+from authentication.providers import SupabaseAuthProvider
+
+_SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+_SUPABASE_ANON_KEY = os.getenv("SUPABASE_KEY", "").strip()  # publishable/anon key
+if _SUPABASE_URL and _SUPABASE_ANON_KEY:
+    set_auth_provider(SupabaseAuthProvider(_SUPABASE_URL, _SUPABASE_ANON_KEY))
+else:
+    log.warning("SUPABASE_URL / SUPABASE_KEY not set: /api/v1/auth/* will return 503.")
+
+from feedback.dependencies import set_feedback_repository
+from feedback.repository import PostgresFeedbackRepository
+
+set_feedback_repository(PostgresFeedbackRepository())
+
 app.include_router(auth_router)
 app.include_router(feedback_router)
 
@@ -158,6 +194,29 @@ class SessionStart(BaseModel):
     source_file: str | None = None  # testing: stream this WAV instead of the mic
     session_id: str | None = None  # optional client-provided session id for audio/vision alignment
     user_id: str | None = None  # owner of the session (e.g. email)
+
+
+CurrentUser = Depends(get_request_user)  # AuthenticatedUser, or None if AUTH_REQUIRED=false
+
+
+async def _owned_session(session_id: str, user: AuthenticatedUser | None) -> dict:
+    """The session if `user` owns it. 404 (not 403) for someone else's session, so a
+    caller can't tell whether a session id exists."""
+    session = await asyncio.to_thread(db.get_session, session_id) if session_id else None
+    if session is None or (user is not None and session.get("user_id") != user.id):
+        raise HTTPException(404, "session not found")
+    manager.owners[session_id] = session.get("user_id")  # live events go to this owner
+    return session
+
+
+async def _owned_chunk_session(chunk_id: str, user: AuthenticatedUser | None) -> dict:
+    session_id = await asyncio.to_thread(db.chunk_session_id, chunk_id)
+    if session_id is None:
+        raise HTTPException(404, "chunk not found")
+    try:
+        return await _owned_session(session_id, user)
+    except HTTPException:
+        raise HTTPException(404, "chunk not found")
 
 
 class OverrideRequest(BaseModel):
@@ -202,7 +261,7 @@ def health():
         "mic_status": pipeline.mic_status,
         "flush_interval_seconds": audio_pipeline.FLUSH_INTERVAL_SECONDS,
         "noise_scoring": semantic.NOISE_SCORING,
-        "database": "postgres",
+        "database": "memory" if db.is_memory_mode() else "postgres",
         "audio_storage": "supabase" if storage.ENABLED else "local",
         "vision_model": "yolov8_loaded" if privacy_model_instance is not None else "bypass",
         "ocr_available": ocr is not None,
@@ -211,8 +270,12 @@ def health():
 
 
 @app.get("/api/v1/user/{user_id}/session-quota")
-async def user_session_quota(user_id: str):
+async def user_session_quota(user_id: str, user: AuthenticatedUser | None = CurrentUser):
     """Enforce Scenario 2: Maximum of 2 unfinished sessions per user."""
+    if user is not None and user_id not in (user.id, "me"):
+        raise HTTPException(403, "You can only check your own quota.")
+    if user is not None:
+        user_id = user.id
     unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, user_id)
     return {
         "user_id": user_id,
@@ -224,13 +287,23 @@ async def user_session_quota(user_id: str):
 
 
 @app.post("/api/v1/session/start")
-async def session_start(body: SessionStart):
+async def session_start(body: SessionStart, user: AuthenticatedUser | None = CurrentUser):
     if pipeline.running:
-        raise HTTPException(409, f"session {pipeline.session_id} already active")
+        # don't reveal another user's session id
+        mine = user is None or manager.owners.get(pipeline.session_id) == user.id
+        raise HTTPException(409, f"session {pipeline.session_id} already active" if mine
+                            else "Another recording is already running on the server.")
+
+    # the owner comes from the token; body.user_id is only used without login (dev mode)
+    owner_id = user.id if user is not None else body.user_id
+    if body.session_id and user is not None:
+        existing = await asyncio.to_thread(db.get_session, body.session_id)
+        if existing is not None and existing.get("user_id") != user.id:
+            raise HTTPException(409, "session_id is already in use - start without one.")
 
     # Enforce Scenario 2: Maximum of 2 unfinished sessions per user
-    if body.user_id:
-        unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, body.user_id)
+    if owner_id:
+        unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, owner_id)
         if unfinished_count >= 2:
             raise HTTPException(
                 403,
@@ -242,19 +315,21 @@ async def session_start(body: SessionStart):
     session_id = body.session_id or str(uuid.uuid4())
     topic = body.seminar_topic.strip() or semantic.DEFAULT_SEMINAR_TOPIC
     seed = await asyncio.to_thread(semantic.seed_vector, topic)
-    await asyncio.to_thread(db.create_session, session_id, body.title, topic, seed, body.user_id)
+    await asyncio.to_thread(db.create_session, session_id, body.title, topic, seed, owner_id)
+    manager.owners[session_id] = owner_id
     audio_pipeline.text_accumulator.clear()
     await pipeline.start(session_id, device=body.device, source_file=body.source_file,
                          source=body.source, warmup=body.warmup)
     await manager.broadcast({"type": "session_started", "session_id": session_id,
-                             "title": body.title, "seminar_topic": topic, "user_id": body.user_id})
+                             "title": body.title, "seminar_topic": topic, "user_id": owner_id})
     return {"session_id": session_id, "title": body.title, "seminar_topic": topic,
-            "status": "ACTIVE", "user_id": body.user_id}
+            "status": "ACTIVE", "user_id": owner_id}
 
 
 @app.delete("/api/v1/session/{session_id}/inputs")
-async def delete_session_inputs_endpoint(session_id: str):
+async def delete_session_inputs_endpoint(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """Scenario 1: Permanently deletes session inputs from Supabase DB and Storage while preserving the generated note."""
+    await _owned_session(session_id, user)
     success = await asyncio.to_thread(db.purge_session_inputs, session_id)
     await asyncio.to_thread(storage.delete_session_audio, session_id)
     return {
@@ -266,8 +341,11 @@ async def delete_session_inputs_endpoint(session_id: str):
 
 
 @app.post("/api/v1/sessions/cleanup-expired")
-async def cleanup_expired_sessions_endpoint():
-    """7-day automatic deletion mechanism for completed sessions whose inputs were retained."""
+async def cleanup_expired_sessions_endpoint(user: AuthenticatedUser | None = CurrentUser):
+    """7-day automatic deletion mechanism for completed sessions whose inputs were retained.
+    Runs by itself every hour; this manual trigger touches every user's data, so admin only."""
+    if user is not None and user.role != "admin":
+        raise HTTPException(403, "Admin only.")
     purged_ids = await asyncio.to_thread(db.cleanup_expired_sessions)
     for sid in purged_ids:
         await asyncio.to_thread(storage.delete_session_audio, sid)
@@ -279,9 +357,11 @@ async def cleanup_expired_sessions_endpoint():
 
 
 @app.post("/api/v1/session/stop")
-async def session_stop():
+async def session_stop(user: AuthenticatedUser | None = CurrentUser):
     if not pipeline.running:
         raise HTTPException(409, "no active session")
+    if user is not None and manager.owners.get(pipeline.session_id) != user.id:
+        raise HTTPException(409, "no active session")  # someone else's recording
     await pipeline.stop()  # also flushes the leftover buffer
     session_id = pipeline.session_id
     await asyncio.to_thread(db.end_session, session_id)
@@ -302,12 +382,14 @@ async def session_stop():
 
 
 @app.patch("/api/v1/chunk/{chunk_id}/override")
-async def chunk_override(chunk_id: str, body: OverrideRequest):
+async def chunk_override(chunk_id: str, body: OverrideRequest,
+                         user: AuthenticatedUser | None = CurrentUser):
     """Red-Box console action: KEPT (include in notes, whole chunk) or DELETED (exclude).
     PENDING: noise stays out, a MIXED chunk goes in without its off-topic sentence(s)."""
     status = db.OVERRIDE_ALIASES.get(body.status.strip().upper())
     if status is None:
         raise HTTPException(422, "status must be KEPT, DELETED or PENDING")
+    await _owned_chunk_session(chunk_id, user)
     row = await asyncio.to_thread(db.set_override, chunk_id, status)
     if row is None:
         raise HTTPException(404, "chunk not found")
@@ -317,13 +399,15 @@ async def chunk_override(chunk_id: str, body: OverrideRequest):
 
 
 @app.patch("/api/v1/chunk/{chunk_id}/text")
-async def chunk_edit(chunk_id: str, body: EditRequest):
+async def chunk_edit(chunk_id: str, body: EditRequest,
+                     user: AuthenticatedUser | None = CurrentUser):
     """Red-Box console action: Edit. Saves the corrected text and KEEPs the chunk;
     the notes use it as-is. text=null undoes the edit: original text, and PENDING if
     the chunk is flagged (back to review) or KEEP if it is not."""
     text = None if body.text is None else " ".join(body.text.split())
     if text == "":
         raise HTTPException(422, "text is empty - use DELETED to drop the chunk")
+    await _owned_chunk_session(chunk_id, user)
     row = await asyncio.to_thread(db.set_edited_text, chunk_id, text)
     if row is None:
         raise HTTPException(404, "chunk not found")
@@ -333,28 +417,25 @@ async def chunk_edit(chunk_id: str, body: EditRequest):
 
 
 @app.get("/api/v1/session/{session_id}/chunks")
-async def session_chunks(session_id: str):
+async def session_chunks(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """All chunks incl. flagged noise - for the Red-Box review console."""
-    if await asyncio.to_thread(db.get_session, session_id) is None:
-        raise HTTPException(404, "session not found")
+    await _owned_session(session_id, user)
     rows = await asyncio.to_thread(db.list_chunks, session_id)
     return {"session_id": session_id, "chunks": [_chunk_json(r) for r in rows]}
 
 
 @app.get("/api/v1/session/{session_id}/flagged")
-async def session_flagged(session_id: str):
+async def session_flagged(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """The Red-Box review list: chunks flagged as noise plus MIXED chunks."""
-    if await asyncio.to_thread(db.get_session, session_id) is None:
-        raise HTTPException(404, "session not found")
+    await _owned_session(session_id, user)
     rows = await asyncio.to_thread(db.list_chunks, session_id, False, True)
     return {"session_id": session_id, "chunks": [_chunk_json(r) for r in rows]}
 
 
 @app.get("/api/v1/session/{session_id}/containers")
-async def session_containers(session_id: str):
+async def session_containers(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """10-minute containers (built on stop) - for the timeline/heatmap."""
-    if await asyncio.to_thread(db.get_session, session_id) is None:
-        raise HTTPException(404, "session not found")
+    await _owned_session(session_id, user)
     rows = await asyncio.to_thread(db.list_containers, session_id)
     return {"session_id": session_id,
             "container_seconds": audio_pipeline.CONTAINER_SECONDS,
@@ -363,12 +444,10 @@ async def session_containers(session_id: str):
 
 
 @app.get("/api/v1/session/{session_id}/clean-transcript")
-async def clean_transcript(session_id: str):
+async def clean_transcript(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """Transcript for note synthesis: noise removed unless the user KEPT it, and the
     off-topic sentences of MIXED chunks removed unless the user KEPT the chunk."""
-    session = await asyncio.to_thread(db.get_session, session_id)
-    if session is None:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(session_id, user)
     rows = await asyncio.to_thread(db.list_chunks, session_id, True)
     items = [{**_chunk_json(r), "clean_text": db.clean_text(r)} for r in rows]
     items = [i for i in items if i["clean_text"]]
@@ -402,12 +481,24 @@ async def process_snapshot(
     privacy_target: str = Form("full_body"),
     enhancement_mode: str = Form("magic_color"),
     note_preference: str = Form("BOTH"),
+    user: AuthenticatedUser | None = CurrentUser,
 ):
     """
     Receives an uploaded board image from mobile camera, applies YOLOv8 privacy blur,
     enhances slide contrast, extracts OCR text, uploads to Supabase (if configured),
     and saves locally in static/snapshots/.
     """
+    if user is not None:
+        # The standalone board camera sends a new id of its own (sess_<millis>): create
+        # that session for this user. An existing session must be the user's own.
+        if await asyncio.to_thread(db.get_session, session_id) is None:
+            if await asyncio.to_thread(db.count_unfinished_sessions, user.id) >= 2:
+                raise HTTPException(403, "Storage limit reached: a maximum of 2 unfinished "
+                                         "sessions is allowed. Generate notes for or delete "
+                                         "an existing session first.")
+            await asyncio.to_thread(db.create_session_if_missing, session_id,
+                                    "Board Capture", user.id)
+        await _owned_session(session_id, user)  # snapshots only go into your own session
     try:
         contents = await file.read()
         np_arr = np.frombuffer(contents, np.uint8)
@@ -504,11 +595,18 @@ async def process_snapshot(
 
 
 @app.patch("/api/v1/vision/snapshot/{snapshot_id}/preference")
-async def update_snapshot_preference(snapshot_id: str, body: SnapshotPreferenceRequest):
+async def update_snapshot_preference(snapshot_id: str, body: SnapshotPreferenceRequest,
+                                     user: AuthenticatedUser | None = CurrentUser):
     """Updates whether the snapshot includes IMAGE_ONLY, OCR_TEXT_ONLY, or BOTH."""
     pref = body.preference.strip().upper()
     if pref not in ("IMAGE_ONLY", "OCR_TEXT_ONLY", "BOTH"):
         raise HTTPException(422, "preference must be IMAGE_ONLY, OCR_TEXT_ONLY, or BOTH")
+    if user is not None:
+        snap_session = await asyncio.to_thread(db.snapshot_session_id, snapshot_id)
+        try:
+            await _owned_session(snap_session, user)
+        except HTTPException:
+            raise HTTPException(404, "snapshot not found")
     if approve_store is not None and approve_store.is_supabase_configured():
         url, key = approve_store.get_supabase_config()
         endpoint = f"{url}/rest/v1/image_snapshots?snapshot_id=eq.{snapshot_id}"
@@ -529,12 +627,13 @@ async def update_snapshot_preference(snapshot_id: str, body: SnapshotPreferenceR
 
 class GenerateNotesRequest(BaseModel):
     session_id: str
-    user_id: str = "default_user"
+    user_id: str = "default_user"  # ignored when signed in: the owner comes from the token
     session_data: dict | None = None
 
 
 @app.post("/api/v1/notes/generate")
-async def generate_notes_endpoint(body: GenerateNotesRequest):
+async def generate_notes_endpoint(body: GenerateNotesRequest,
+                                  user: AuthenticatedUser | None = CurrentUser):
     """
     Synthesizes academic lecture notes from transcribed audio chunks and board snapshots.
     Integrates Gemini AI multimodal synthesis, builds styled Word .docx,
@@ -542,19 +641,26 @@ async def generate_notes_endpoint(body: GenerateNotesRequest):
     """
     if notes_generation is None:
         raise HTTPException(500, "Notes generation module not available on server.")
+    if user is not None:
+        await _owned_session(body.session_id, user)
+    # the user id also drives the 2-notes quota, which DELETES the oldest notes of that
+    # user - so it must never be a value the client picks
+    owner_id = user.id if user is not None else body.user_id
 
     result = await asyncio.to_thread(
         notes_generation.generate_notes_for_session,
         body.session_id,
-        body.user_id,
+        owner_id,
         body.session_data,
     )
     return result
 
 
 @app.get("/api/v1/notes/session/{session_id}")
-async def get_session_notes_endpoint(session_id: str):
+async def get_session_notes_endpoint(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """Fetches generated notes record for a given session."""
+    if user is not None:
+        await _owned_session(session_id, user)
     if notes_generation is not None:
         note = await asyncio.to_thread(notes_generation.get_note_by_session, session_id)
         if note:
@@ -563,8 +669,10 @@ async def get_session_notes_endpoint(session_id: str):
 
 
 @app.get("/api/v1/notes/{session_id}/docx")
-async def download_note_docx(session_id: str):
+async def download_note_docx(session_id: str, user: AuthenticatedUser | None = CurrentUser):
     """Downloads or streams the generated Word .docx document for a session."""
+    if user is not None:
+        await _owned_session(session_id, user)
     for d in [Path.home() / "Desktop", Path.home() / "Documents", ROOT_DIR / "generated_notes_docs"]:
         candidate = d / f"{session_id}_notes.docx"
         if candidate.exists():
@@ -576,10 +684,26 @@ async def download_note_docx(session_id: str):
     raise HTTPException(404, f"DOCX file for session '{session_id}' not found.")
 
 
+async def _ws_user(websocket: WebSocket) -> tuple[bool, AuthenticatedUser | None]:
+    """WebSockets can't send headers from browsers/Flutter easily: token is ?token=...
+    Returns (ok, user); on failure the socket is closed with 1008 (policy violation)."""
+    try:
+        return True, await user_from_token(websocket.query_params.get("token"))
+    except HTTPException as e:
+        await websocket.accept()
+        detail = e.detail.get("message") if isinstance(e.detail, dict) else str(e.detail)
+        await websocket.close(code=1008, reason=detail[:120])
+        return False, None
+
+
 @app.websocket("/ws/transcript")
 async def ws_transcript(websocket: WebSocket):
-    """Live transcript stream. Server pushes JSON; client doesn't need to send anything."""
-    await manager.connect(websocket)
+    """Live transcript stream. Server pushes JSON; client doesn't need to send anything.
+    Each client only receives the events of its own sessions."""
+    ok, user = await _ws_user(websocket)
+    if not ok:
+        return
+    await manager.connect(websocket, user.id if user else None)
     try:
         while True:
             await websocket.receive_text()  # keeps the connection open; input ignored
@@ -590,7 +714,13 @@ async def ws_transcript(websocket: WebSocket):
 @app.websocket("/ws/audio")
 async def ws_audio(websocket: WebSocket):
     """Audio upstream for source="browser": binary frames of 16 kHz mono int16 LE PCM."""
+    ok, user = await _ws_user(websocket)
+    if not ok:
+        return
     await websocket.accept()
+    if user is not None and manager.owners.get(pipeline.session_id) != user.id:
+        await websocket.close(code=1008, reason="no active browser-source session")
+        return
     if not (pipeline.running and pipeline.source == "browser"):
         await websocket.close(code=1008, reason="no active browser-source session")
         return

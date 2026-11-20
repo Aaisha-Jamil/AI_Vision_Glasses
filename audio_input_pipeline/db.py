@@ -151,16 +151,38 @@ def _expected_columns() -> dict[str, set[str]]:
                                           sql, re.S)}
 
 
+DB_CONNECT_ATTEMPTS = 3       # startup tries before giving up on Postgres
+DB_CONNECT_TIMEOUT = 20.0     # seconds per try
+
+
 def init_db():
-    """Fail fast with a clear message if the DB is missing a table or column."""
+    """Fail fast with a clear message if the DB is missing a table or column.
+    A failed connection is retried: the Supabase pooler sometimes drops the first
+    connection ("server closed the connection unexpectedly"), and once the server falls
+    back to memory mode it never reconnects."""
     global _USE_MEMORY_FALLBACK
     if is_memory_mode():
-        log.info("Running in memory fallback mode (Postgres not configured).")
+        log.warning("DATABASE_URL is not set. Running in IN-MEMORY mode: sessions and "
+                    "chunks are NOT saved and are lost when the server stops.")
         return
+    for attempt in range(1, DB_CONNECT_ATTEMPTS + 1):
+        try:
+            with _get_pool().connection(timeout=DB_CONNECT_TIMEOUT) as conn:
+                rows = conn.execute("SELECT table_name, column_name FROM information_schema.columns "
+                                    "WHERE table_schema = 'public'").fetchall()
+            break
+        except Exception as e:
+            if attempt == DB_CONNECT_ATTEMPTS:
+                _USE_MEMORY_FALLBACK = True
+                log.error("Postgres unavailable after %d attempts (%s). Running in IN-MEMORY "
+                          "mode: sessions and chunks are NOT saved and are lost when the "
+                          "server stops. Restart the server once the database is reachable.",
+                          attempt, e)
+                return
+            log.warning("Postgres connection attempt %d/%d failed (%s); retrying in 3 s.",
+                        attempt, DB_CONNECT_ATTEMPTS, e)
+            time.sleep(3)
     try:
-        with connect() as conn:
-            rows = conn.execute("SELECT table_name, column_name FROM information_schema.columns "
-                                "WHERE table_schema = 'public'").fetchall()
         have: dict[str, set[str]] = {}
         for r in rows:
             have.setdefault(r["table_name"], set()).add(r["column_name"])
@@ -171,7 +193,8 @@ def init_db():
                                f"{', '.join(missing)} - run schema_postgres.sql on it")
     except Exception as e:
         _USE_MEMORY_FALLBACK = True
-        log.warning("Postgres connection failed (%s); switching to in-memory mode.", e)
+        log.error("Database schema check failed (%s). Running in IN-MEMORY mode: sessions "
+                  "and chunks are NOT saved and are lost when the server stops.", e)
 
 
 def to_vec(vec: np.ndarray) -> np.ndarray:
@@ -217,6 +240,25 @@ def create_session(session_id: str, title: str, seminar_topic: str, seed_vector:
         )
 
 
+def create_session_if_missing(session_id: str, title: str, user_id: str | None,
+                              input_type: str = "Image") -> bool:
+    """A camera-only session (no audio yet, so no topic vector) owned by user_id.
+    Never touches an existing session. True if it was created."""
+    if is_memory_mode():
+        if session_id in _mem_sessions:
+            return False
+        _mem_sessions[session_id] = {"session_id": session_id, "user_id": user_id,
+                                     "title": title, "status": "ACTIVE",
+                                     "notes_generated": False, "expires_at": None}
+        return True
+    with connect() as conn:
+        row = conn.execute(
+            "INSERT INTO sessions (session_id, user_id, title, input_type, notes_generated) "
+            "VALUES (%s, %s, %s, %s, FALSE) ON CONFLICT (session_id) DO NOTHING "
+            "RETURNING session_id", (session_id, user_id, title, input_type)).fetchone()
+    return row is not None
+
+
 def count_unfinished_sessions(user_id: str | None = None) -> int:
     """Returns number of unfinished sessions (notes_generated = FALSE) for the given user."""
     if is_memory_mode():
@@ -227,7 +269,9 @@ def count_unfinished_sessions(user_id: str | None = None) -> int:
     with connect() as conn:
         if user_id:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM sessions WHERE (user_id = %s OR user_id IS NULL) "
+                # only this user's own sessions: ownerless ones (user_id NULL) must not
+                # count against every user, or two of them block all new sessions
+                "SELECT COUNT(*) AS cnt FROM sessions WHERE user_id = %s "
                 "AND (notes_generated IS FALSE OR notes_generated IS NULL)",
                 (user_id,)
             ).fetchone()
@@ -463,6 +507,27 @@ def _update_returning(sql: str, params: tuple) -> dict | None:
     """UPDATE ... RETURNING the chunk: one statement, one round trip."""
     with connect() as conn:
         return conn.execute(f"{sql} RETURNING {CHUNK_COLUMNS}", params).fetchone()
+
+
+def chunk_session_id(chunk_id: str) -> str | None:
+    """The session a chunk belongs to (for the owner check), None if no such chunk."""
+    if is_memory_mode():
+        c = _mem_chunks.get(chunk_id)
+        return c.get("session_id") if c else None
+    with connect() as conn:
+        row = conn.execute("SELECT session_id FROM audio_chunks WHERE chunk_id = %s",
+                           (chunk_id,)).fetchone()
+    return row["session_id"] if row else None
+
+
+def snapshot_session_id(snapshot_id: str) -> str | None:
+    """The session a board snapshot belongs to, None if unknown (memory mode keeps none)."""
+    if is_memory_mode():
+        return None
+    with connect() as conn:
+        row = conn.execute("SELECT session_id FROM image_snapshots WHERE snapshot_id = %s",
+                           (snapshot_id,)).fetchone()
+    return row["session_id"] if row else None
 
 
 def set_override(chunk_id: str, status: str) -> dict | None:

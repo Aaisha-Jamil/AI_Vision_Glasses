@@ -27,7 +27,8 @@ def get_easyocr_reader():
 def get_supabase_config():
     """Reads Supabase URL and Key from environment variables."""
     url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
+    # backend only: secret (service-role) key, not the public key RLS limits per user
+    key = (os.getenv("SUPABASE_SECRET_KEY", "") or os.getenv("SUPABASE_KEY", "")).strip()
     if "/rest" in url:
         url = url.split("/rest")[0]
     return url.rstrip('/'), key

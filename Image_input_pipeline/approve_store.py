@@ -35,7 +35,9 @@ load_env_file()
 
 def get_supabase_config():
     url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
+    # This runs on the backend server, so it uses the secret (service-role) key: the
+    # public/anon key will be limited to the signed-in user's own rows by RLS.
+    key = (os.getenv("SUPABASE_SECRET_KEY", "") or os.getenv("SUPABASE_KEY", "")).strip()
     if "/rest" in url:
         url = url.split("/rest")[0]
     return url.rstrip('/'), key
@@ -60,7 +62,9 @@ def ensure_session_exists(session_id="lecture_session_01", title="Lecture Sessio
         "apikey": key,
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates"
+        # ignore, not merge: an existing session must keep its title/status/owner
+        # (merge reset them to "Lecture Session"/ACTIVE on every snapshot)
+        "Prefer": "resolution=ignore-duplicates"
     }
     payload = {
         "session_id": session_id,

@@ -19,4 +19,16 @@ class AuthSessionStore {
   static Future<void> clear() {
     return _storage.delete(key: _accessTokenKey);
   }
+
+  /// Headers for the FastAPI backend: the signed-in user's access token (the backend
+  /// takes the owner of sessions/notes from it, never from a user_id the app sends).
+  static Future<Map<String, String>> authHeaders([
+    Map<String, String> extra = const {},
+  ]) async {
+    final token = await readAccessToken();
+    return {
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+      ...extra,
+    };
+  }
 }

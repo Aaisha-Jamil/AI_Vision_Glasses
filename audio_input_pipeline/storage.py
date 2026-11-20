@@ -71,6 +71,11 @@ def _headers() -> dict:
     return headers
 
 
+def _auth_headers() -> dict:
+    """Auth only - for JSON requests (list/delete), where audio/flac would be wrong."""
+    return {"apikey": SUPABASE_SECRET_KEY, "Authorization": f"Bearer {SUPABASE_SECRET_KEY}"}
+
+
 def upload(object_path: str, data: bytes) -> str:
     """PUT one object into AUDIO_BUCKET (overwrites). Returns the supabase:// path.
     Retries network errors, 429 and 5xx; other 4xx (bad key, no bucket) fail at once."""
@@ -116,8 +121,8 @@ def delete_session_audio(session_id: str) -> bool:
             prefixes = [f"{session_id}/{f['name']}" for f in files if "name" in f]
             if prefixes:
                 del_url = f"{SUPABASE_URL}/storage/v1/object/{AUDIO_BUCKET}"
-                req = httpx.Request("DELETE", del_url, json={"prefixes": prefixes}, headers=_headers())
-                del_resp = httpx.send(req)
+                del_resp = httpx.request("DELETE", del_url, json={"prefixes": prefixes},
+                                         headers=_auth_headers(), timeout=15)
                 log.info("Deleted %d audio files for session %s from Supabase Storage (%d)", len(prefixes), session_id, del_resp.status_code)
                 return del_resp.status_code < 400
         return True
@@ -135,8 +140,8 @@ def delete_snapshot_images(snapshot_ids: list[str], bucket: str = "lecture-slide
         for sid in snapshot_ids:
             prefixes.extend([f"public/{sid}.jpg", f"{sid}.jpg"])
         del_url = f"{SUPABASE_URL}/storage/v1/object/{bucket}"
-        req = httpx.Request("DELETE", del_url, json={"prefixes": prefixes}, headers=_headers())
-        del_resp = httpx.send(req)
+        del_resp = httpx.request("DELETE", del_url, json={"prefixes": prefixes},
+                                 headers=_auth_headers(), timeout=15)
         log.info("Deleted slide images from %s: %s (%d)", bucket, snapshot_ids, del_resp.status_code)
         return del_resp.status_code < 400
     except Exception as e:

@@ -1,5 +1,7 @@
 """Dependency injection and role-based authorization for protected API routes."""
 
+import os
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .providers import AuthProvider, SupabaseAuthProviderNotConfigured
@@ -39,6 +41,36 @@ async def get_current_user(
             detail="Invalid or expired access token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+# AUTH_REQUIRED=false (local testing only): session/notes endpoints also accept requests
+# without a token, as before login existed - for static/index.html and tools/*.py.
+# A token that IS sent is always verified. Default: login required.
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "true").strip().lower() not in ("false", "0", "no")
+
+
+async def get_request_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    provider: AuthProvider = Depends(get_auth_provider),
+) -> AuthenticatedUser | None:
+    """The signed-in user; None only when AUTH_REQUIRED=false and no token was sent."""
+    if credentials is None and not AUTH_REQUIRED:
+        return None
+    return await get_current_user(credentials, provider)
+
+
+async def user_from_token(token: str | None) -> AuthenticatedUser | None:
+    """Same as get_request_user, for WebSockets (token comes as ?token=...)."""
+    if not token:
+        if AUTH_REQUIRED:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bearer access token is required.")
+        return None
+    try:
+        return await get_auth_provider().verify_access_token(token)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired access token.")
 
 
 def require_roles(*allowed_roles: str):

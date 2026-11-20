@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../data/demo_data.dart';
+import '../services/auth_service.dart';
 import '../widgets/ui_helpers.dart';
 import 'audio_studio_screen.dart';
 import 'feedback_screen.dart';
@@ -26,7 +27,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    DemoData.loadFromSupabase(widget.email).then((_) {
+    // currentUserId was set by login / AuthGate; widget.email is only for display
+    DemoData.loadFromSupabase().then((_) {
       if (mounted) setState(() {});
     });
   }
@@ -39,6 +41,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       confirmText: 'Logout',
     );
     if (!confirmed || !context.mounted) return;
+    // revoke the session and delete the stored token, or the app logs in again by itself
+    try {
+      await AuthService.instance.logout();
+    } catch (_) {}
+    if (!context.mounted) return;
+    DemoData.currentUserId = '';
     DemoData.savedInputs.clear();
     DemoData.notes.clear();
     DemoData.refreshCount();

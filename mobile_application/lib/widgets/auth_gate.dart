@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 
+import '../data/demo_data.dart';
 import '../services/auth_service.dart';
 import '../models/app_user.dart';
 import '../screens/login_screen.dart';
@@ -27,7 +28,12 @@ class _AuthGateState extends State<AuthGate> {
   @override
   void initState() {
     super.initState();
-    _userFuture = AuthService.instance.currentUser();
+    // Set the user id before the dashboard builds: sessions and notes are saved and
+    // loaded under it (it must be the Supabase user id, not the email).
+    _userFuture = AuthService.instance.currentUser().then((user) {
+      DemoData.currentUserId = user.id;
+      return user;
+    });
   }
 
   @override

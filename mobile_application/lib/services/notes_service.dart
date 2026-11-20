@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'api_config.dart';
+import 'auth_session_store.dart';
 
 class NotesService {
   static final NotesService _instance = NotesService._internal();
@@ -27,10 +28,12 @@ class NotesService {
       final response = await http
           .post(
             uri,
-            headers: {'Content-Type': 'application/json'},
+            // the backend takes the owner from the token (user_id above is ignored)
+            headers: await AuthSessionStore.authHeaders({'Content-Type': 'application/json'}),
             body: jsonEncode(payload),
           )
-          .timeout(const Duration(seconds: 45));
+          // Gemini took ~4 min in tests; 45 s made the app always fall back to local notes
+          .timeout(const Duration(minutes: 5));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -49,7 +52,9 @@ class NotesService {
   Future<Map<String, dynamic>?> fetchSessionNote(String sessionId) async {
     try {
       final uri = _config.endpoint('/api/v1/notes/session/$sessionId');
-      final response = await http.get(uri).timeout(const Duration(seconds: 6));
+      final response = await http
+          .get(uri, headers: await AuthSessionStore.authHeaders())
+          .timeout(const Duration(seconds: 6));
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
       }

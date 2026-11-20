@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'api_config.dart';
+import 'auth_session_store.dart';
 
 class VisionService {
   static final VisionService _instance = VisionService._internal();
@@ -22,6 +23,7 @@ class VisionService {
         'POST',
         _config.endpoint('/api/v1/vision/process-snapshot'),
       );
+      request.headers.addAll(await AuthSessionStore.authHeaders());
 
       final bytes = await imageFile.readAsBytes();
       final multipartFile = http.MultipartFile.fromBytes(
@@ -79,7 +81,7 @@ class VisionService {
     try {
       final resp = await http.patch(
         _config.endpoint('/api/v1/vision/snapshot/$snapshotId/preference'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await AuthSessionStore.authHeaders({'Content-Type': 'application/json'}),
         body: jsonEncode({'preference': preference}),
       ).timeout(const Duration(seconds: 4));
       return resp.statusCode == 200;

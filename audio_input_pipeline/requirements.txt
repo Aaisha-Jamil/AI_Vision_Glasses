@@ -16,3 +16,6 @@ psycopg-pool
 pgvector
 # Supabase Storage uploads (only used when SUPABASE_URL is set)
 httpx
+# main.py imports cv2 at startup, and the vision snapshot endpoint takes form uploads
+opencv-python
+python-multipart

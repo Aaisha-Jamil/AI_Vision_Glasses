@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../data/demo_data.dart';
 import '../services/auth_service.dart';
+import '../widgets/ui_helpers.dart';
 import 'dashboard_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -117,6 +118,14 @@ class _LoginScreenState extends State<LoginScreen> {
                           return Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              // login/signup go through the backend, so the server
+                              // URL must be settable before signing in
+                              IconButton(
+                                tooltip: 'Server URL',
+                                icon: const Icon(Icons.router_outlined),
+                                onPressed: () => showServerConfigDialog(context),
+                              ),
+                              const SizedBox(width: 6),
                               Icon(
                                 isDark
                                     ? Icons.nightlight_round

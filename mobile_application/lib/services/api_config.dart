@@ -1,6 +1,20 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiConfig {
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const String _baseUrlKey = 'ai_vision_backend_url';
+
+  /// Restores the server URL saved on this device (call once before runApp).
+  Future<void> load() async {
+    try {
+      final saved = await _storage.read(key: _baseUrlKey);
+      if (saved != null && saved.isNotEmpty) _baseUrl = saved;
+    } catch (e) {
+      debugPrint('ApiConfig: could not read saved server URL: $e');
+    }
+  }
+
   static final ApiConfig _instance = ApiConfig._internal();
   factory ApiConfig() => _instance;
 
@@ -28,6 +42,9 @@ class ApiConfig {
       cleaned = 'http://$cleaned';
     }
     _baseUrl = cleaned;
+    _storage.write(key: _baseUrlKey, value: cleaned).catchError(
+          (Object e) => debugPrint('ApiConfig: could not save server URL: $e'),
+        );
   }
 
   Uri endpoint(String path) {
