@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'screens/dashboard_screen.dart';
+import 'services/notes_job_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/auth_gate.dart';
 
@@ -26,6 +27,11 @@ class _NotesPrivacyAppState extends State<NotesPrivacyApp> {
       valueListenable: darkMode,
       builder: (context, isDark, child) {
         return MaterialApp(
+          // background notes generation shows snackbars / dialogs on any screen
+          navigatorKey: NotesJobs.navigatorKey,
+          scaffoldMessengerKey: NotesJobs.messengerKey,
+          builder: (context, child) =>
+              NotesProgressBanner(child: child ?? const SizedBox.shrink()),
           debugShowCheckedModeBanner: false,
           title: 'Privacy Preserving Smart Notes',
           theme: AppTheme.lightTheme,

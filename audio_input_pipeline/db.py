@@ -361,6 +361,32 @@ def update_topic(session_id: str, vector: np.ndarray, topic_match: float | None 
         )
 
 
+def rename_session(session_id: str, title: str | None, seminar_topic: str | None,
+                   seed_vector: np.ndarray | None):
+    """Name given at stop time (before the final flush). The topic vector is re-seeded only
+    if no flush has run yet - after one, it holds the learned centroid and stays."""
+    if is_memory_mode():
+        s = _mem_sessions.get(session_id)
+        if s:
+            if title:
+                s["title"] = title
+            if seminar_topic:
+                s["seminar_topic"] = seminar_topic
+                if seed_vector is not None and s.get("flush_count", 0) == 0:
+                    s["topic_centroid_vector"] = seed_vector
+        return
+    with connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET title = COALESCE(%s, title), "
+            "seminar_topic = COALESCE(%s, seminar_topic), "
+            "topic_centroid_vector = CASE WHEN %s::vector IS NOT NULL AND flush_count = 0 "
+            "THEN %s::vector ELSE topic_centroid_vector END WHERE session_id = %s",
+            (title, seminar_topic,
+             None if seed_vector is None else to_vec(seed_vector),
+             None if seed_vector is None else to_vec(seed_vector), session_id),
+        )
+
+
 def end_session(session_id: str):
     if is_memory_mode():
         s = _mem_sessions.get(session_id)
@@ -528,6 +554,28 @@ def snapshot_session_id(snapshot_id: str) -> str | None:
         row = conn.execute("SELECT session_id FROM image_snapshots WHERE snapshot_id = %s",
                            (snapshot_id,)).fetchone()
     return row["session_id"] if row else None
+
+
+def get_snapshot(snapshot_id: str) -> dict | None:
+    """One board snapshot row (session, image location, note preference), None if unknown."""
+    if is_memory_mode():
+        return None
+    with connect() as conn:
+        return conn.execute(
+            "SELECT snapshot_id, session_id, blurred_image_url, storage_path, "
+            "note_inclusion_preference FROM image_snapshots WHERE snapshot_id = %s",
+            (snapshot_id,)).fetchone()
+
+
+def replace_snapshot_image(snapshot_id: str, image_url: str, storage_path: str):
+    """Points a snapshot at its new (cropped) image and drops its old OCR rows, in one
+    transaction; the caller runs OCR on the new image afterwards."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE image_snapshots SET blurred_image_url = %s, blurred_filepath = %s, "
+            "storage_path = %s WHERE snapshot_id = %s",
+            (image_url, image_url, storage_path, snapshot_id))
+        conn.execute("DELETE FROM ocr_extractions WHERE snapshot_id = %s", (snapshot_id,))
 
 
 def set_override(chunk_id: str, status: str) -> dict | None:

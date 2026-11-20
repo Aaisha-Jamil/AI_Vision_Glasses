@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../data/demo_data.dart';
 import '../models/note.dart';
 import '../theme/app_theme.dart';
@@ -98,114 +100,10 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
     }
   }
 
-  Future<void> previewNote(DemoNote note) async {
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(note.title),
-        content: SizedBox(
-          width: 520,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (note.docxUrl != null && note.docxUrl!.isNotEmpty) ...[
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primary(context).withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: AppTheme.primary(context).withValues(alpha: 0.3)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.description, size: 18, color: AppTheme.primary(context)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Word Document (.docx): ${note.docxUrl}',
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                SelectableText(
-                  note.content,
-                  style: const TextStyle(fontSize: 13, height: 1.4),
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Close'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              editNote(note);
-            },
-            child: const Text('Edit'),
-          ),
-        ],
-      ),
-    );
-  }
+  Future<void> previewNote(DemoNote note) =>
+      openNotePreview(context, note, onEdit: () => editNote(note));
 
-  void openDocx(DemoNote note) {
-    final url = note.docxUrl;
-    if (url == null || url.isEmpty) {
-      showMessage(context, 'No .docx document path associated with this note.');
-      return;
-    }
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.description, color: AppTheme.primary(context)),
-            const SizedBox(width: 8),
-            const Text('Word Document (.docx)'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'A formatted academic Word .docx document was synthesized with embedded figures and native equation formulas.',
-              style: TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: AppTheme.mutedText.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: SelectableText(
-                url,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
+  Future<void> downloadDocx(DemoNote note) => downloadNoteDocx(context, note);
 
   void requestExport(String format) {
     if (format == 'Markdown') {
@@ -350,9 +248,9 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
                         ),
                         if (note.docxUrl != null && note.docxUrl!.isNotEmpty)
                           OutlinedButton.icon(
-                            onPressed: () => openDocx(note),
-                            icon: Icon(Icons.description, color: AppTheme.primary(context)),
-                            label: const Text('.DOCX'),
+                            onPressed: () => downloadDocx(note),
+                            icon: Icon(Icons.download, color: AppTheme.primary(context)),
+                            label: const Text('Download .docx'),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: AppTheme.primary(context),
                             ),
@@ -402,6 +300,110 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
         ],
       ),
       ),
+    );
+  }
+}
+
+/// Opens the full-page preview of [note] (rendered Markdown + Download .docx).
+Future<void> openNotePreview(BuildContext context, DemoNote note, {VoidCallback? onEdit}) {
+  return Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (ctx) => _NotePreviewPage(
+        note: note,
+        onDownload: () => downloadNoteDocx(ctx, note),
+        onEdit: onEdit,
+      ),
+    ),
+  );
+}
+
+/// Opens the note's .docx URL; the browser / phone downloads or opens it directly.
+Future<void> downloadNoteDocx(BuildContext context, DemoNote note) async {
+  final url = note.docxUrl ?? '';
+  final uri = Uri.tryParse(url);
+  if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
+    showMessage(
+      context,
+      url.isEmpty
+          ? 'No .docx document is associated with this note.'
+          : 'This .docx was not uploaded to cloud storage, so it cannot be downloaded '
+              'on this device (it is on the server at: $url).',
+    );
+    return;
+  }
+  final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+  if (!ok && context.mounted) showMessage(context, 'Could not open the download link.');
+}
+
+/// Full-page preview of a note, rendered from its Markdown (the same content as the
+/// .docx; Word styling differs), with a Download .docx button.
+class _NotePreviewPage extends StatelessWidget {
+  const _NotePreviewPage({
+    required this.note,
+    required this.onDownload,
+    required this.onEdit,
+  });
+
+  final DemoNote note;
+  final Future<void> Function() onDownload;
+  final VoidCallback? onEdit;
+
+  bool get _hasDocx => (note.docxUrl ?? '').isNotEmpty;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(note.title, overflow: TextOverflow.ellipsis),
+        actions: [
+          if (onEdit != null)
+            IconButton(
+              tooltip: 'Edit',
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: () {
+                Navigator.pop(context);
+                onEdit!();
+              },
+            ),
+          if (_hasDocx)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilledButton.icon(
+                onPressed: onDownload,
+                icon: const Icon(Icons.download),
+                label: const Text('.docx'),
+              ),
+            ),
+        ],
+      ),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 820),
+            child: Markdown(
+              data: note.content,
+              selectable: true,
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+              onTapLink: (text, href, title) {
+                final uri = href == null ? null : Uri.tryParse(href);
+                if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+              },
+            ),
+          ),
+        ),
+      ),
+      bottomNavigationBar: _hasDocx
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: FilledButton.icon(
+                  onPressed: onDownload,
+                  icon: const Icon(Icons.download),
+                  label: const Text('Download Word document (.docx)'),
+                ),
+              ),
+            )
+          : null,
     );
   }
 }

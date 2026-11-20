@@ -131,6 +131,21 @@ def delete_session_audio(session_id: str) -> bool:
         return False
 
 
+def delete_storage_object(path: str) -> bool:
+    """Deletes one object given as '<bucket>/<path in bucket>' (image_snapshots.storage_path)."""
+    if not ENABLED or "/" not in path:
+        return False
+    bucket, name = path.split("/", 1)
+    try:
+        resp = httpx.request("DELETE", f"{SUPABASE_URL}/storage/v1/object/{bucket}",
+                             json={"prefixes": [name]}, headers=_auth_headers(), timeout=15)
+        log.info("Deleted storage object %s (%d)", path, resp.status_code)
+        return resp.status_code < 400
+    except Exception as e:
+        log.warning("Failed to delete storage object %s: %s", path, e)
+        return False
+
+
 def delete_snapshot_images(snapshot_ids: list[str], bucket: str = "lecture-slides") -> bool:
     """Deletes slide snapshot image files from the lecture-slides bucket."""
     if not ENABLED or not snapshot_ids:

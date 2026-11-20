@@ -8,6 +8,7 @@ import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
 import '../services/audio_service.dart';
+import '../services/notes_job_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'board_camera_screen.dart';
@@ -64,6 +65,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
   String? currentSessionId;
 
+  // lecture name typed when the recording was stopped (also the noise-scoring topic)
+  String? sessionName;
+
   @override
   void initState() {
     super.initState();
@@ -80,6 +84,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
   void _loadResumedSession(SavedInput s) {
     currentSessionId = s.sessionId;
+    sessionName = s.title;
 
     if (s.audioDuration != null && s.audioDuration!.contains(':')) {
       final parts = s.audioDuration!.split(':');
@@ -324,11 +329,24 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     });
 
     try {
-      await AudioService().stopSession();
+      // mic off first, so nothing more is recorded while the user types the name
+      await AudioService().stopMicrophone();
+
+      if (!mounted) return;
+
+      // noise scoring runs on stop, so the lecture name is asked now and used as
+      // the topic (empty / skipped = generic default topic)
+      final typedName = await _askLectureName();
+
+      await AudioService().stopSession(
+        title: typedName ?? _defaultSessionName(),
+        seminarTopic: typedName,
+      );
 
       if (!mounted) return;
 
       setState(() {
+        sessionName = typedName;
         isRecording = false;
         isPaused = false;
         isAudioActionInProgress = false;
@@ -349,6 +367,69 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
       showMessage(context, 'Could not stop backend session: $error');
     }
+  }
+
+  String _defaultSessionName() =>
+      'Workshop Lecture ${DateTime.now().month}/${DateTime.now().day} - #${DemoData.nextInputId}';
+
+  /// Lecture name typed at stop time; null if left empty or skipped.
+  Future<String?> _askLectureName() async {
+    final controller = TextEditingController(text: sessionName ?? '');
+
+    final name = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.edit_note, color: primaryCol),
+            const SizedBox(width: 8),
+            const Text('Name this Lecture'),
+          ],
+        ),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Write the lecture topic. It becomes the session name and helps detect off-topic noise.',
+                style: TextStyle(fontSize: 14),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (v) => Navigator.pop(dialogContext, v),
+                decoration: const InputDecoration(
+                  labelText: 'Lecture Topic',
+                  hintText: 'e.g. Cooking methods',
+                  prefixIcon: Icon(Icons.topic_outlined),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, ''),
+            child: const Text('Skip'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+
+    controller.dispose();
+
+    final trimmed = name?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   void keepFlaggedLine(LectureTranscriptEntry entry) {
@@ -575,10 +656,11 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       if (!mounted) return;
     }
 
-    final defaultSessionName =
-        'Workshop Lecture ${DateTime.now().month}/${DateTime.now().day} - #${DemoData.nextInputId}';
+    final defaultSessionName = _defaultSessionName();
 
-    final nameController = TextEditingController(text: defaultSessionName);
+    // prefilled with the name typed at stop time, so it isn't typed twice
+    final nameController =
+        TextEditingController(text: sessionName ?? defaultSessionName);
 
     final shouldSave = await showDialog<bool>(
       context: context,
@@ -670,7 +752,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       return;
     }
 
-    final sessionName = nameController.text.trim().isEmpty
+    final savedName = nameController.text.trim().isEmpty
         ? defaultSessionName
         : nameController.text.trim();
 
@@ -678,7 +760,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     DemoData.addSessionInput(
       sessionId: currentSessionId,
-      title: sessionName,
+      title: savedName,
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
       audioDuration: timeText,
@@ -693,7 +775,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     messenger?.showSnackBar(
       SnackBar(
-        content: Text('Session "$sessionName" saved in Saved Inputs.'),
+        content: Text('Session "$savedName" saved in Saved Inputs.'),
         action: SnackBarAction(
           label: 'View Inputs',
           onPressed: () {
@@ -753,25 +835,19 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     final session = DemoData.addSessionInput(
       sessionId: currentSessionId,
-      title: 'Workshop Lecture Session #${DemoData.nextInputId}',
+      title: sessionName ?? 'Workshop Lecture Session #${DemoData.nextInputId}',
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
       audioDuration: timeText,
       allTranscriptLines: allTranscriptLineItems,
     );
 
-    final note = await DemoData.generateAiNotesForInput(session);
-
-    if (note != null && mounted) {
-      await showPostNoteGenerationRetentionDialog(
-        context: context,
-        session: session,
-        note: note,
-        onDone: () {
-          if (mounted) setState(() {});
-        },
-      );
-    }
+    if (!mounted) return;
+    // runs in the background (progress strip at the top); the Keep / Discard
+    // inputs dialog opens from the "Notes ready" snackbar
+    NotesJobs.instance.start(session, onChanged: () {
+      if (mounted) setState(() {});
+    });
   }
 
   // Builds a transcript line.

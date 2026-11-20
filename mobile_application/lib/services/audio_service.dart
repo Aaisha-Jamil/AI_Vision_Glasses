@@ -117,8 +117,10 @@ class AudioService {
             }),
             body: jsonEncode({
               'title': title,
-              'seminar_topic': seminarTopic ??
-                  'Computer Science, AI & Machine Learning Lecture',
+              // no topic -> the backend's generic default (the user names the
+              // lecture at stop time, see stopSession)
+              if (seminarTopic != null && seminarTopic.trim().isNotEmpty)
+                'seminar_topic': seminarTopic.trim(),
               'source': source,
             }),
           )
@@ -250,7 +252,16 @@ class AudioService {
   // STOP SESSION
   // ---------------------------------------------------------
 
-  Future<Map<String, dynamic>> stopSession() async {
+  /// Stops the mic only (the backend session stays open), so no more audio is
+  /// recorded while the user types the lecture name before [stopSession].
+  Future<void> stopMicrophone() => _cleanupAudio();
+
+  /// [title] becomes the session title; [seminarTopic] (the lecture name the user
+  /// typed) is used by noise scoring, which runs on stop. Null = keep the start values.
+  Future<Map<String, dynamic>> stopSession({
+    String? title,
+    String? seminarTopic,
+  }) async {
     try {
       await _cleanupAudio();
 
@@ -260,8 +271,14 @@ class AudioService {
             headers: await AuthSessionStore.authHeaders({
               'Content-Type': 'application/json',
             }),
+            body: jsonEncode({
+              if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
+              if (seminarTopic != null && seminarTopic.trim().isNotEmpty)
+                'seminar_topic': seminarTopic.trim(),
+            }),
           )
-          .timeout(const Duration(seconds: 15));
+          // scoring runs on stop (embeddings + maybe one LLM session check)
+          .timeout(const Duration(seconds: 45));
 
       if (resp.statusCode != 200) {
         throw Exception(

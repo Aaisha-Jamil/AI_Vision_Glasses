@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'api_config.dart';
@@ -39,13 +40,22 @@ class NotesService {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         return data;
       }
+      var detail = 'HTTP ${response.statusCode}';
+      try {
+        detail = (jsonDecode(response.body) as Map<String, dynamic>)['detail']?.toString() ?? detail;
+      } catch (_) {}
+      return {'status': 'error', 'message': detail};
+    } on TimeoutException {
+      return {
+        'status': 'offline',
+        'message': 'The server took more than 5 minutes to answer. Please try again.',
+      };
     } catch (e) {
-      // Backend offline, timeout or network error - will fall back to local synthesis
+      return {
+        'status': 'offline',
+        'message': 'Backend server offline or unreachable. Check the server URL and Wi-Fi.',
+      };
     }
-    return {
-      'status': 'offline',
-      'message': 'Backend server offline or unreachable',
-    };
   }
 
   /// Fetches an existing generated note for [sessionId] from the server.

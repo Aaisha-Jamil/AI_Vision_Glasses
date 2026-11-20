@@ -356,14 +356,28 @@ async def cleanup_expired_sessions_endpoint(user: AuthenticatedUser | None = Cur
     }
 
 
+class SessionStop(BaseModel):
+    """Optional: the name the user gives when stopping. Applied before the final flush,
+    so noise scoring uses it (with FLUSH_INTERVAL_SECONDS=0 that is the only flush)."""
+    title: str | None = None
+    seminar_topic: str | None = None  # empty/None = keep the start topic
+
+
 @app.post("/api/v1/session/stop")
-async def session_stop(user: AuthenticatedUser | None = CurrentUser):
+async def session_stop(body: SessionStop | None = None,
+                       user: AuthenticatedUser | None = CurrentUser):
     if not pipeline.running:
         raise HTTPException(409, "no active session")
     if user is not None and manager.owners.get(pipeline.session_id) != user.id:
         raise HTTPException(409, "no active session")  # someone else's recording
-    await pipeline.stop()  # also flushes the leftover buffer
     session_id = pipeline.session_id
+    if body is not None:
+        title = (body.title or "").strip() or None
+        topic = (body.seminar_topic or "").strip() or None
+        if title or topic:
+            seed = await asyncio.to_thread(semantic.seed_vector, topic) if topic else None
+            await asyncio.to_thread(db.rename_session, session_id, title, topic, seed)
+    await pipeline.stop()  # also flushes the leftover buffer
     await asyncio.to_thread(db.end_session, session_id)
     await manager.broadcast({"type": "session_stopped", "session_id": session_id})
     chunks = await asyncio.to_thread(db.list_chunks, session_id)
@@ -371,6 +385,8 @@ async def session_stop(user: AuthenticatedUser | None = CurrentUser):
     return {
         "session_id": session_id,
         "status": "COMPLETED",
+        "title": session["title"],
+        "seminar_topic": session["seminar_topic"],
         "chunks_transcribed": len(chunks),
         "chunks_flagged": sum(1 for c in chunks if c["is_flagged_noise"]),
         "chunks_mixed": sum(1 for c in chunks if c["is_mixed"]),
@@ -509,77 +525,32 @@ async def process_snapshot(
         raise HTTPException(400, f"Error decoding image: {e}")
 
     snapshot_id = f"snap_{uuid.uuid4().hex[:10]}"
-    timestamp = 0.0
 
-    # 1. Privacy Blurring (YOLOv8)
-    human_count = 0
-    human_mask = None
-    processed_frame = frame
-    if privacy_model_instance is not None:
-        try:
-            processed_frame, human_count, human_mask = privacy_model_instance.apply_privacy_blur(
-                frame, timestamp=timestamp, target_mode=privacy_target
-            )
-        except Exception as e:
-            log.warning("YOLOv8 blur failed (%s), proceeding with original frame.", e)
-            processed_frame = frame
+    # Blur + enhance + save (~1 s) on the vision thread, so the event loop (audio, live
+    # transcript, other requests) is never blocked by image work.
+    loop = asyncio.get_running_loop()
+    processed_frame, human_count, human_mask, local_image_url = await loop.run_in_executor(
+        _vision_pool, _blur_enhance_save, frame, snapshot_id, session_id,
+        privacy_target, enhancement_mode, note_preference)
 
-    # 2. Slide Enhancement (CamScanner-style leveling & sharpening)
-    if enhance_slide is not None:
-        try:
-            processed_frame = enhance_slide(
-                processed_frame, timestamp=timestamp, mode=enhancement_mode, human_mask=human_mask
-            )
-        except Exception as e:
-            log.warning("Enhancement failed (%s), keeping processed frame.", e)
-
-    # 3. Save locally to static/snapshots/
-    local_filename = f"{snapshot_id}.jpg"
-    local_path = SNAPSHOTS_DIR / local_filename
-    cv2.imwrite(str(local_path), processed_frame)
-    local_image_url = f"/static/snapshots/{local_filename}"
-
-    # 4. Extract OCR text
-    extracted_text = ""
-    avg_conf = 0.0
+    # OCR (EasyOCR, 5-19 s on this CPU) runs in the background; the app gets the image
+    # now and the text from GET /api/v1/vision/snapshot/{id}/ocr (or the ocr_ready event).
+    # Notes generation waits for a session's pending OCR, so no text is lost.
     if ocr is not None:
-        try:
-            extracted_text, avg_conf = ocr.process_ocr_worker(
-                snapshot_id, session_id, processed_frame, human_mask, note_preference
-            )
-        except Exception as e:
-            log.warning("OCR processing failed (%s).", e)
-            extracted_text = "[No legible text extracted]"
-            avg_conf = 0.0
+        _start_ocr(snapshot_id, session_id, processed_frame, human_mask, note_preference)
+        extracted_text, ocr_status = OCR_PENDING_TEXT, "PENDING"
     else:
-        extracted_text = "[OCR module not available]"
+        extracted_text, ocr_status = "[OCR module not available]", "DONE"
 
-    # 5. Save to Supabase Storage & Database (if configured)
-    if approve_store is not None:
-        try:
-            snapshot_data = {
-                "snapshot_id": snapshot_id,
-                "session_id": session_id,
-                "sequence_timestamp": timestamp,
-                "captured_timestamp": timestamp,
-                "frame": processed_frame,
-                "status": "APPROVED",
-                "note_inclusion_preference": note_preference,
-                "is_replacement": False,
-            }
-            approve_store.save_snapshot_to_supabase(snapshot_data)
-        except Exception as e:
-            log.warning("Supabase snapshot persistence failed (%s).", e)
-
-    # Broadcast event to WebSocket clients
     await manager.broadcast({
         "type": "snapshot_captured",
         "snapshot_id": snapshot_id,
         "session_id": session_id,
         "blurred_image_url": local_image_url,
         "extracted_text": extracted_text,
+        "ocr_status": ocr_status,
         "people_detected": human_count,
-        "confidence_score": round(avg_conf, 2),
+        "confidence_score": 0.0,
     })
 
     return {
@@ -587,10 +558,219 @@ async def process_snapshot(
         "session_id": session_id,
         "blurred_image_url": local_image_url,
         "extracted_text": extracted_text,
-        "confidence_score": round(avg_conf, 2),
+        "ocr_status": ocr_status,
+        "confidence_score": 0.0,
         "people_detected": human_count,
         "note_inclusion_preference": note_preference,
         "status": "APPROVED",
+    }
+
+
+# ------------------------------------------------------------------ background OCR
+# One worker each: YOLO/EasyOCR share one model instance and the laptop has 2 cores,
+# so parallel runs would only slow each other down. FIFO keeps capture order.
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_vision_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
+_ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
+OCR_PENDING_TEXT = "OCR processing…"  # the app shows this until the text arrives
+OCR_NOTES_WAIT_S = 300  # notes generation waits at most this long for pending OCR
+_ocr_jobs: dict[str, asyncio.Future] = {}       # snapshot_id -> running OCR
+_ocr_job_session: dict[str, str] = {}           # snapshot_id -> session_id
+_ocr_results: dict[str, tuple[str, float]] = {}  # snapshot_id -> (text, confidence)
+_OCR_RESULTS_MAX = 1000
+
+
+def _blur_enhance_save(frame, snapshot_id, session_id, privacy_target, enhancement_mode,
+                       note_preference):
+    """YOLO blur -> enhancement -> local file -> Supabase (runs on _vision_pool)."""
+    timestamp = 0.0
+    human_count, human_mask, processed = 0, None, frame
+    if privacy_model_instance is not None:
+        try:
+            processed, human_count, human_mask = privacy_model_instance.apply_privacy_blur(
+                frame, timestamp=timestamp, target_mode=privacy_target)
+        except Exception as e:
+            log.warning("YOLOv8 blur failed (%s), proceeding with original frame.", e)
+            processed = frame
+    if enhance_slide is not None:
+        try:
+            processed = enhance_slide(processed, timestamp=timestamp, mode=enhancement_mode,
+                                      human_mask=human_mask)
+        except Exception as e:
+            log.warning("Enhancement failed (%s), keeping processed frame.", e)
+    cv2.imwrite(str(SNAPSHOTS_DIR / f"{snapshot_id}.jpg"), processed)
+    # Saved before OCR: the OCR row references image_snapshots (FK), so OCR can only
+    # be stored once the snapshot row exists.
+    if approve_store is not None:
+        try:
+            approve_store.save_snapshot_to_supabase({
+                "snapshot_id": snapshot_id, "session_id": session_id,
+                "sequence_timestamp": timestamp, "captured_timestamp": timestamp,
+                "frame": processed, "status": "APPROVED",
+                "note_inclusion_preference": note_preference, "is_replacement": False,
+            })
+        except Exception as e:
+            log.warning("Supabase snapshot persistence failed (%s).", e)
+    return processed, human_count, human_mask, f"/static/snapshots/{snapshot_id}.jpg"
+
+
+def _ocr_sync(snapshot_id, session_id, frame, human_mask, note_preference):
+    """EasyOCR + save to ocr_extractions (runs on _ocr_pool). Never raises."""
+    t0 = time.perf_counter()
+    try:
+        text, conf = ocr.process_ocr_worker(snapshot_id, session_id, frame, human_mask,
+                                            note_preference)
+    except Exception as e:
+        log.warning("OCR processing failed for %s (%s).", snapshot_id, e)
+        text, conf = "[No legible text extracted]", 0.0
+    log.info("OCR %s done in %.1f s", snapshot_id, time.perf_counter() - t0)
+    return text, conf
+
+
+def _store_ocr_result(snapshot_id: str, text: str, conf: float):
+    _ocr_results[snapshot_id] = (text, conf)
+    while len(_ocr_results) > _OCR_RESULTS_MAX:  # oldest first (dicts keep insert order)
+        _ocr_results.pop(next(iter(_ocr_results)))
+
+
+def _start_ocr(snapshot_id, session_id, frame, human_mask, note_preference):
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_ocr_pool, _ocr_sync, snapshot_id, session_id, frame,
+                               human_mask, note_preference)
+    _ocr_jobs[snapshot_id] = fut
+    _ocr_job_session[snapshot_id] = session_id
+
+    async def _done():
+        text, conf = await fut
+        _store_ocr_result(snapshot_id, text, conf)
+        _ocr_jobs.pop(snapshot_id, None)
+        _ocr_job_session.pop(snapshot_id, None)
+        await manager.broadcast({
+            "type": "ocr_ready", "snapshot_id": snapshot_id, "session_id": session_id,
+            "extracted_text": text, "confidence_score": round(conf, 2),
+        })
+
+    asyncio.ensure_future(_done())
+
+
+async def _wait_for_ocr(snapshot_ids: list[str], timeout: float = OCR_NOTES_WAIT_S):
+    futs = [_ocr_jobs[s] for s in snapshot_ids if s in _ocr_jobs]
+    if futs:
+        log.info("waiting for %d pending OCR job(s)...", len(futs))
+        await asyncio.wait(futs, timeout=timeout)
+
+
+def _session_ocr_jobs(session_id: str) -> list[str]:
+    return [s for s, sess in list(_ocr_job_session.items()) if sess == session_id]
+
+
+def _fill_ocr_text(session_data: dict):
+    """Notes from the app's session_data: the app may still hold the placeholder (or an
+    older text) for a snapshot whose OCR finished here - use the server's result."""
+    for key in ("image_snapshots", "capturedImages", "snapshots"):
+        for s in session_data.get(key) or []:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get("snapshot_id") or s.get("snapshotId")
+            app_text = (s.get("ocr_text") or s.get("ocrText") or "").strip()
+            if sid in _ocr_results and (not app_text or app_text == OCR_PENDING_TEXT):
+                s["ocr_text"] = _ocr_results[sid][0]
+                s.pop("ocrText", None)
+            elif app_text == OCR_PENDING_TEXT:  # unknown here (e.g. server restarted)
+                s["ocr_text"] = ""  # Gemini still reads the image itself
+                s.pop("ocrText", None)
+
+
+@app.get("/api/v1/vision/snapshot/{snapshot_id}/ocr")
+async def snapshot_ocr_status(snapshot_id: str, user: AuthenticatedUser | None = CurrentUser):
+    """Background OCR state: PENDING, DONE (+ text) or UNKNOWN (not run since the
+    server started - the app then stops waiting)."""
+    if user is not None:
+        snap_session = await asyncio.to_thread(db.snapshot_session_id, snapshot_id)
+        try:
+            await _owned_session(snap_session, user)
+        except HTTPException:
+            raise HTTPException(404, "snapshot not found")
+    if snapshot_id in _ocr_jobs:
+        return {"snapshot_id": snapshot_id, "status": "PENDING"}
+    if snapshot_id in _ocr_results:
+        text, conf = _ocr_results[snapshot_id]
+        return {"snapshot_id": snapshot_id, "status": "DONE", "extracted_text": text,
+                "confidence_score": round(conf, 2)}
+    return {"snapshot_id": snapshot_id, "status": "UNKNOWN"}
+
+
+@app.post("/api/v1/vision/snapshot/{snapshot_id}/replace")
+async def replace_snapshot(snapshot_id: str, file: UploadFile = File(...),
+                           user: AuthenticatedUser | None = CurrentUser):
+    """Replaces a snapshot's image with a cropped version and re-runs OCR on it.
+
+    The snapshot id, session and note preference stay the same. The crop is made from
+    the already blurred + enhanced image, so YOLO blur runs again (in case the app
+    cropped its local unblurred copy) but enhancement does not (it would apply twice).
+    OCR is local EasyOCR: no API tokens. The new image gets a new file name, so no
+    CDN/app cache can serve the old one; the old file is deleted."""
+    if db.is_memory_mode():
+        raise HTTPException(503, "database unavailable - cannot replace a snapshot right now")
+    snap = await asyncio.to_thread(db.get_snapshot, snapshot_id)
+    if snap is None:
+        raise HTTPException(404, "snapshot not found")
+    if user is not None:
+        try:
+            await _owned_session(snap["session_id"], user)
+        except HTTPException:
+            raise HTTPException(404, "snapshot not found")
+
+    frame = cv2.imdecode(np.frombuffer(await file.read(), np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(400, "Invalid image data received.")
+
+    human_count, human_mask = 0, None
+    if privacy_model_instance is not None:
+        try:
+            frame, human_count, human_mask = await asyncio.to_thread(
+                privacy_model_instance.apply_privacy_blur, frame, timestamp=0.0,
+                target_mode="full_body")
+        except Exception as e:
+            log.warning("YOLOv8 blur failed on cropped snapshot (%s); using the crop as is.", e)
+
+    version_name = f"{snapshot_id}_v{int(time.time())}"
+    cv2.imwrite(str(SNAPSHOTS_DIR / f"{version_name}.jpg"), frame)
+    image_url = f"/static/snapshots/{version_name}.jpg"
+    storage_path = f"local/{version_name}.jpg"
+    if approve_store is not None and approve_store.is_supabase_configured():
+        public_url, uploaded_path = await asyncio.to_thread(
+            approve_store.upload_image_bytes_to_supabase, frame, version_name)
+        if not public_url:
+            raise HTTPException(502, "Could not upload the cropped image to storage.")
+        image_url, storage_path = public_url, uploaded_path
+
+    old_path = snap.get("storage_path") or ""
+    await asyncio.to_thread(db.replace_snapshot_image, snapshot_id, image_url, storage_path)
+    if old_path and old_path != storage_path:
+        if old_path.startswith("lecture-slides/"):
+            await asyncio.to_thread(storage.delete_storage_object, old_path)
+        old_local = SNAPSHOTS_DIR / Path(old_path).name
+        old_local.unlink(missing_ok=True)
+
+    text, conf = "[OCR module not available]", 0.0
+    if ocr is not None:
+        # a still-running OCR of the old image must not finish later and overwrite this one
+        await _wait_for_ocr([snapshot_id])
+        text, conf = await asyncio.get_running_loop().run_in_executor(
+            _ocr_pool, _ocr_sync, snapshot_id, snap["session_id"], frame, human_mask,
+            snap.get("note_inclusion_preference") or "BOTH")
+        _store_ocr_result(snapshot_id, text, conf)
+
+    return {
+        "snapshot_id": snapshot_id,
+        "session_id": snap["session_id"],
+        "blurred_image_url": image_url,
+        "extracted_text": text,
+        "confidence_score": round(conf, 2),
+        "people_detected": human_count,
+        "status": "REPLACED",
     }
 
 
@@ -646,6 +826,17 @@ async def generate_notes_endpoint(body: GenerateNotesRequest,
     # the user id also drives the 2-notes quota, which DELETES the oldest notes of that
     # user - so it must never be a value the client picks
     owner_id = user.id if user is not None else body.user_id
+
+    # board images still in OCR: wait, so their text is in the notes (DB rows and
+    # the app's session_data both get it)
+    waiting = _session_ocr_jobs(body.session_id)
+    for key in ("image_snapshots", "capturedImages", "snapshots"):  # ids the app sent
+        for s in (body.session_data or {}).get(key) or []:
+            if isinstance(s, dict):
+                waiting.append(s.get("snapshot_id") or s.get("snapshotId"))
+    await _wait_for_ocr(waiting)
+    if body.session_data:
+        _fill_ocr_text(body.session_data)
 
     result = await asyncio.to_thread(
         notes_generation.generate_notes_for_session,

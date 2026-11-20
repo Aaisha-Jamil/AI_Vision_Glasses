@@ -120,6 +120,10 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
           confidenceScore: conf,
           peopleDetected: peopleDetected,
         );
+        // OCR runs in the background on the server: fetch the text when ready
+        if (ocrText == CapturedImageItem.ocrPendingText) {
+          VisionService().watchOcr(snapshotId);
+        }
         hasPreview = true;
         looksGoodClicked = false;
         isProcessing = false;

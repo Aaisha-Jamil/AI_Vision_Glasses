@@ -1,21 +1,45 @@
 import 'package:flutter/material.dart';
 import '../models/board_image_item.dart';
+import '../services/vision_service.dart';
 import '../theme/app_theme.dart';
+import 'full_screen_image_viewer.dart';
 import 'image_loader.dart';
 
-class BoardPreviewWidget extends StatelessWidget {
+class BoardPreviewWidget extends StatefulWidget {
   const BoardPreviewWidget({
     super.key,
     required this.item,
     this.showOptionsSelector = false,
     this.onOptionChanged,
     this.compact = false,
+    this.onImageReplaced,
   });
 
   final CapturedImageItem item;
   final bool showOptionsSelector;
   final ValueChanged<BoardImageOption>? onOptionChanged;
   final bool compact;
+
+  /// Called after the user cropped the image in the full-screen viewer (the item's
+  /// image URL and OCR text are already updated).
+  final VoidCallback? onImageReplaced;
+
+  @override
+  State<BoardPreviewWidget> createState() => _BoardPreviewWidgetState();
+}
+
+class _BoardPreviewWidgetState extends State<BoardPreviewWidget> {
+  CapturedImageItem get item => widget.item;
+  bool get showOptionsSelector => widget.showOptionsSelector;
+  ValueChanged<BoardImageOption>? get onOptionChanged => widget.onOptionChanged;
+  bool get compact => widget.compact;
+
+  Future<void> _openFullScreen() async {
+    final changed = await openFullScreenImage(context, item);
+    if (!mounted || !changed) return;
+    setState(() {}); // new image + OCR text
+    widget.onImageReplaced?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +99,7 @@ class BoardPreviewWidget extends StatelessWidget {
     final hasLocal = localImageExists(item.localImagePath);
     final hasRealImage = hasRemote || hasLocal;
 
-    return Container(
+    final preview = Container(
       height: compact ? 140 : 210,
       width: double.infinity,
       decoration: BoxDecoration(
@@ -247,20 +271,37 @@ class BoardPreviewWidget extends StatelessWidget {
                     ),
                   ),
                 const Spacer(),
-                Text(
-                  item.title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
-                  ),
-                  overflow: TextOverflow.ellipsis,
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        item.title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (hasRealImage)
+                      const Tooltip(
+                        message: 'Tap to view full screen / crop',
+                        child: Icon(Icons.open_in_full, color: Colors.white, size: 18),
+                      ),
+                  ],
                 ),
               ],
             ),
           ),
         ],
       ),
+    );
+
+    if (!hasRealImage) return preview;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(onTap: _openFullScreen, child: preview),
     );
   }
 
@@ -305,13 +346,17 @@ class BoardPreviewWidget extends StatelessWidget {
           const Divider(height: 12),
           Expanded(
             child: SingleChildScrollView(
-              child: Text(
-                item.ocrText,
-                style: TextStyle(
-                  fontSize: compact ? 11 : 12,
-                  height: 1.4,
-                  fontFamily: 'monospace',
-                  color: theme.colorScheme.onSurface,
+              // rebuilds when background OCR text arrives
+              child: ValueListenableBuilder<int>(
+                valueListenable: VisionService.ocrUpdates,
+                builder: (context, _, _) => Text(
+                  item.ocrText,
+                  style: TextStyle(
+                    fontSize: compact ? 11 : 12,
+                    height: 1.4,
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.onSurface,
+                  ),
                 ),
               ),
             ),

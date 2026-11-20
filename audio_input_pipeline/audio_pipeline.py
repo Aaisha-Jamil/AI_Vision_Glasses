@@ -59,6 +59,9 @@ MIC_WARMUP_MAX_SECONDS = float(os.getenv("MIC_WARMUP_MAX_SECONDS", "10"))
 MIC_WARMUP_QUIET_SECONDS = 0.5
 AUDIO_DIR = Path("data/audio")
 FLUSH_INTERVAL_SECONDS = float(os.getenv("FLUSH_INTERVAL_SECONDS", "600"))  # 10 min; 0 = on stop only
+# one LLM "lecture or chatter?" call per flush when the topic is generic or the topic
+# guard fires (llm_filter.session_is_lecture); off = embeddings only, as before
+SESSION_CHECK = os.getenv("SESSION_CHECK", "true").strip().lower() in ("1", "true", "yes", "on")
 CONTAINER_SECONDS = float(os.getenv("CONTAINER_SECONDS", "600"))  # chunk -> container by start
 
 # In-memory buffer of transcribed chunks not yet scored by a flush.
@@ -317,9 +320,31 @@ class AudioPipeline:
             labels, mode = await self._llm_labels(session["seminar_topic"], batch)
             override = None if labels is None else np.array(
                 [c["index"] in labels and not labels[c["index"]]["is_mixed"] for c in batch])
+            texts = [c["transcript"] for c in batch]
+            specific_topic = session["seminar_topic"] != semantic.DEFAULT_SEMINAR_TOPIC
             res = await asyncio.to_thread(
-                semantic.score_batch, [c["transcript"] for c in batch], topic, cold, override,
-                session["seminar_topic"] != semantic.DEFAULT_SEMINAR_TOPIC)
+                semantic.score_batch, texts, topic, cold, override, specific_topic)
+            session_check = None
+            if labels is None and (not specific_topic or res["topic_guard"]):
+                # generic topic, or the guard is about to flag the whole batch: embeddings
+                # can't tell lecture from chatter here, so ask the LLM once
+                session_check = await self._session_check(session["seminar_topic"], texts)
+                if session_check is not None and not session_check[0]:  # chatter
+                    res = await asyncio.to_thread(
+                        semantic.score_batch, texts, topic, cold,
+                        np.ones(len(batch), dtype=bool), False)
+                    res["topic_guard"] = True  # session did not look like the topic/lecture
+                    res["mode"] = "session_check:not_lecture"
+                    reason = f"not a lecture (session check): {session_check[1]}"
+                    labels = {c["index"]: {"is_mixed": False, "reason": reason, "off_topic": []}
+                              for c in batch}
+                elif session_check is not None and res["topic_guard"]:  # lecture: undo guard
+                    log.warning("topic guard overruled: LLM says lecture (%s) - two_pass "
+                                "instead; is seminar_topic %r right?",
+                                session_check[1], session["seminar_topic"])
+                    res = await asyncio.to_thread(
+                        semantic.score_batch, texts, topic, cold, None, False)
+                    res["mode"] += "+session_check:lecture"
             if labels is None:  # embedding mode: MIXED comes from the sentence split
                 labels = {c["index"]: {"is_mixed": True, "reason": r, "off_topic": o}
                           for c, m, r, o in zip(batch, res["is_mixed"], res["mixed_reason"],
@@ -404,6 +429,20 @@ class AudioPipeline:
             log.warning("LLM noise filter failed (%s: %s) - falling back to embeddings",
                         type(e).__name__, e)
             return None, "llm_fallback_embeddings"
+
+    async def _session_check(self, topic: str, texts: list[str]) -> tuple[bool, str] | None:
+        """llm_filter.session_is_lecture; None if off or the call failed (then the
+        embedding result stands: guard as before, generic topic = two_pass)."""
+        if not SESSION_CHECK:
+            return None
+        try:
+            verdict = await asyncio.to_thread(llm_filter.session_is_lecture, topic, texts)
+            log.info("session check: is_lecture=%s (%s)", *verdict)
+            return verdict
+        except Exception as e:
+            log.warning("session check failed (%s: %s) - keeping the embedding result",
+                        type(e).__name__, e)
+            return None
 
     async def _flush_loop(self):
         while True:

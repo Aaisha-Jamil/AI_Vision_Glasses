@@ -5,6 +5,14 @@ import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
 import '../services/notes_service.dart';
 import '../services/supabase_service.dart';
+import '../services/vision_service.dart';
+
+class NotesGenerationException implements Exception {
+  NotesGenerationException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
 
 class DemoData {
   static final List<SavedInput> savedInputs = [];
@@ -378,11 +386,15 @@ class DemoData {
     return newNote;
   }
 
-  /// Asynchronously generates academic lecture notes for [input] by connecting to the
-  /// Python Notes Generation module via NotesService. Falls back seamlessly to
-  /// the synchronous synthesis engine if the backend is offline.
+  /// Generates academic lecture notes for [input] through the backend (Gemini).
+  /// Returns null if notes were already generated for it; throws
+  /// [NotesGenerationException] with the reason if generation fails.
   static Future<DemoNote?> generateAiNotesForInput(SavedInput input) async {
     if (input.notesGenerated) return null;
+
+    // OCR text that arrived after this copy was saved (the server also waits for
+    // still-running OCR and fills it in, so a placeholder never reaches the notes)
+    VisionService.applyKnownOcr(input.capturedImages);
 
     final sessionData = {
       'session_id': input.sessionId,
@@ -421,33 +433,32 @@ class DemoData {
           .toList(),
     };
 
-    try {
-      final res = await NotesService().generateNotes(
-        sessionId: input.sessionId,
-        userId: input.userId,
-        sessionData: sessionData,
+    final res = await NotesService().generateNotes(
+      sessionId: input.sessionId,
+      userId: input.userId,
+      sessionData: sessionData,
+    );
+
+    final markdown = res['markdown_content'];
+    if (res['status'] != 'success' || markdown is! String || markdown.trim().isEmpty) {
+      // No silent local fallback: template notes looked like real AI notes.
+      throw NotesGenerationException(
+        (res['message'] ?? 'Notes generation failed.').toString(),
       );
+    }
+    final docxUrl = (res['docx_url'] as String?) ?? (res['docx_path'] as String?);
 
-      if (res['status'] == 'success' && res['markdown_content'] != null) {
-        final markdown = res['markdown_content'] as String;
-        final docxUrl = (res['docx_url'] as String?) ?? (res['docx_path'] as String?);
+    final newNote = addNote(
+      title: '${input.title} - Comprehensive Notes',
+      content: markdown,
+      type: 'Workshop Session Notes',
+      sessionId: input.sessionId,
+      userId: input.userId,
+      docxUrl: docxUrl,
+    );
 
-        final newNote = addNote(
-          title: '${input.title} - Comprehensive Notes',
-          content: markdown,
-          type: 'Workshop Session Notes',
-          sessionId: input.sessionId,
-          userId: input.userId,
-          docxUrl: docxUrl,
-        );
-
-        input.notesGenerated = true;
-        return newNote;
-      }
-    } catch (_) {}
-
-    // Graceful offline fallback
-    return generateNotesForInput(input);
+    input.notesGenerated = true;
+    return newNote;
   }
 
   /// Scenario 1: Applies retention decision after document has been generated:
