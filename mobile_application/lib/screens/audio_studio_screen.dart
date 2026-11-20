@@ -1154,6 +1154,16 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ),
                   ),
                 ],
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18, color: AppTheme.danger),
+                  tooltip: 'Remove from session',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  onPressed: () {
+                    setState(() => sessionCapturedImages.remove(img));
+                  },
+                ),
               ],
             ),
           ),
@@ -1386,7 +1396,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ),
                   ],
                   const SizedBox(height: 14),
-                  if (entries.isEmpty)
+                  if (entries.isEmpty && sessionCapturedImages.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 24),
                       child: Center(
@@ -1420,9 +1430,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ...() {
                       final List<Widget> transcriptWidgets = [];
 
-                      if (!isRecording &&
-                          seconds > 0 &&
-                          sessionCapturedImages.isNotEmpty) {
+                      // images sit inline at their capture time, also while
+                      // the lecture is still recording
+                      if (sessionCapturedImages.isNotEmpty) {
                         final Map<int, List<CapturedImageItem>> imgByIdx = {};
 
                         for (final img in sessionCapturedImages) {
@@ -1565,7 +1575,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                         ],
                       ),
                     )
-                  else if (!isRecording && seconds > 0)
+                  else
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -1594,74 +1604,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                           ),
                         ],
                       ),
-                    )
-                  else
-                    ...sessionCapturedImages.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final img = entry.value;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHighest
-                              .withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: Theme.of(context).colorScheme.outlineVariant,
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    img.title,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                                Chip(
-                                  label: Text(
-                                    img.option.label,
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                  backgroundColor: primaryCol.withValues(
-                                    alpha: 0.15,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.close,
-                                    size: 18,
-                                    color: AppTheme.danger,
-                                  ),
-                                  tooltip: 'Remove from session',
-                                  onPressed: () {
-                                    setState(() {
-                                      sessionCapturedImages.removeAt(index);
-                                    });
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            BoardPreviewWidget(item: img, compact: true),
-                          ],
-                        ),
-                      );
-                    }),
+                    ),
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
