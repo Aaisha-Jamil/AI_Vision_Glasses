@@ -674,10 +674,12 @@ def _synthesize_academic_markdown(timeline: list, session_meta: dict) -> tuple[s
     return content, usage
 
 
-# Tried in order. A 503 "high demand" on one model is common and short-lived, so the
-# next model is tried instead of waiting (2026-11-20: 3.8/3.7 503, 3.6/3.5 answered).
+# Tried in order. We include production Gemini flash models (2.5, 2.0, 1.5) as well
+# as 3.x preview models so requests succeed even during Google server demand spikes.
 GEMINI_MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash").split(",") if m.strip()]
+    "GEMINI_MODELS",
+    "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash,gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash"
+).split(",") if m.strip()]
 # Per-model limit. Without it the legacy SDK silently retries a 503 for ~10 minutes.
 GEMINI_TIMEOUT_S = float(os.getenv("GEMINI_TIMEOUT_S", "120"))
 
@@ -744,8 +746,13 @@ def _call_gemini(parts: list, session_meta: dict = None, timeline: list = None) 
             })
         return text, usage
 
-    raise RuntimeError("Gemini is unavailable right now (all models failed) - please try again in a few "
-                       "minutes. Details: " + " | ".join(errors))
+    print(f"[notes_generation] Warning: All Gemini cloud models failed or are experiencing high demand spikes.")
+    print(f"[notes_generation] Errors: {' | '.join(errors)}")
+    print("[notes_generation] Gracefully falling back to local academic synthesis engine to generate notes...")
+    text, usage = _synthesize_academic_markdown(timeline or [], session_meta or {})
+    usage["model"] = "offline_academic_synthesis"
+    usage["fallback_reason"] = "All Gemini models temporarily unavailable: " + " | ".join(errors)
+    return text, usage
 
 # ---------------------------------------------------------------------------
 # Stage D: Build styled Microsoft Word .docx

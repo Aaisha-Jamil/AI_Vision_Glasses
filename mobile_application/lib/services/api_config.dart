@@ -52,6 +52,13 @@ class ApiConfig {
     return Uri.parse('$_baseUrl$cleanPath');
   }
 
+  Uri resolveUrl(String path) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return Uri.parse(path);
+    }
+    return endpoint(path);
+  }
+
   Uri get wsTranscriptUri {
     final wsBase = _baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
     return Uri.parse('$wsBase/ws/transcript');

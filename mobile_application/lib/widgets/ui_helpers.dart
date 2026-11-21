@@ -336,17 +336,17 @@ Future<void> showStorageQuotaExceededDialog(BuildContext context) async {
   await showDialog<void>(
     context: context,
     builder: (dialogCtx) => AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
-          Icon(Icons.warning_amber_rounded, color: AppTheme.danger, size: 28),
-          SizedBox(width: 10),
-          Expanded(child: Text('Storage Limit Reached (2/2)')),
+          const Icon(Icons.warning_amber_rounded, color: AppTheme.danger, size: 28),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Storage Limit Reached (${DemoData.maxUnfinishedSessions}/${DemoData.maxUnfinishedSessions})')),
         ],
       ),
-      content: const Text(
-        'Due to limited Supabase database storage, a maximum of 2 unfinished sessions can be saved per user.\n\n'
+      content: Text(
+        'Due to limited Supabase database storage, a maximum of ${DemoData.maxUnfinishedSessions} unfinished sessions can be saved per user.\n\n'
         'Please generate notes for an existing session or delete an unfinished session from "Saved Inputs" before saving a new one.',
-        style: TextStyle(fontSize: 14, height: 1.4),
+        style: const TextStyle(fontSize: 14, height: 1.4),
       ),
       actions: [
         FilledButton(

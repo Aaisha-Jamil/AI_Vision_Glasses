@@ -806,7 +806,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                       const SizedBox(height: 2),
                       Text(
                         DemoData.canAddUnfinishedSession
-                            ? 'Limited Supabase storage: up to 2 unfinished sessions can be saved to continue later.'
+                            ? 'Limited Supabase storage: up to ${DemoData.maxUnfinishedSessions} unfinished sessions can be saved to continue later.'
                             : 'Storage limit reached! Generate notes or delete an unfinished session to free a slot.',
                         style: TextStyle(
                           fontSize: 11,

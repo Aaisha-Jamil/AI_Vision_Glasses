@@ -21,11 +21,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+# Ensure local pipeline modules can be imported regardless of execution working directory
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
+
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -88,6 +93,11 @@ class ConnectionManager:
         self.clients.pop(ws, None)
 
     def _receives(self, client_user: str | None, message: dict) -> bool:
+        # Hardware device events (glasses/ESP32) broadcast to ALL authenticated clients
+        # so images always appear in the Flutter studio regardless of session ownership.
+        msg_type = message.get("type", "")
+        if msg_type in ("glasses_snapshot", "snapshot_captured", "ocr_ready"):
+            return True
         if client_user is None:
             return not AUTH_REQUIRED
         owner = self.owners.get(message.get("session_id"))
@@ -269,9 +279,12 @@ def health():
     }
 
 
+MAX_UNFINISHED_SESSIONS = int(os.getenv("MAX_UNFINISHED_SESSIONS", "5"))
+
+
 @app.get("/api/v1/user/{user_id}/session-quota")
 async def user_session_quota(user_id: str, user: AuthenticatedUser | None = CurrentUser):
-    """Enforce Scenario 2: Maximum of 2 unfinished sessions per user."""
+    """Enforce Scenario 2: Maximum unfinished sessions per user."""
     if user is not None and user_id not in (user.id, "me"):
         raise HTTPException(403, "You can only check your own quota.")
     if user is not None:
@@ -280,9 +293,9 @@ async def user_session_quota(user_id: str, user: AuthenticatedUser | None = Curr
     return {
         "user_id": user_id,
         "unfinished_sessions": unfinished_count,
-        "max_allowed": 2,
-        "can_create_new": unfinished_count < 2,
-        "message": "Storage limit reached (2/2 unfinished sessions). Please complete or delete an existing session first." if unfinished_count >= 2 else "Quota OK",
+        "max_allowed": MAX_UNFINISHED_SESSIONS,
+        "can_create_new": unfinished_count < MAX_UNFINISHED_SESSIONS,
+        "message": f"Storage limit reached ({MAX_UNFINISHED_SESSIONS}/{MAX_UNFINISHED_SESSIONS} unfinished sessions). Please complete or delete an existing session first." if unfinished_count >= MAX_UNFINISHED_SESSIONS else "Quota OK",
     }
 
 
@@ -301,14 +314,14 @@ async def session_start(body: SessionStart, user: AuthenticatedUser | None = Cur
         if existing is not None and existing.get("user_id") != user.id:
             raise HTTPException(409, "session_id is already in use - start without one.")
 
-    # Enforce Scenario 2: Maximum of 2 unfinished sessions per user
+    # Enforce Scenario 2: Maximum unfinished sessions per user
     if owner_id:
         unfinished_count = await asyncio.to_thread(db.count_unfinished_sessions, owner_id)
-        if unfinished_count >= 2:
+        if unfinished_count >= MAX_UNFINISHED_SESSIONS:
             raise HTTPException(
                 403,
                 f"Storage limit reached: You have {unfinished_count} unfinished sessions saved. "
-                "A maximum of 2 unfinished sessions is allowed due to Supabase storage limitations. "
+                f"A maximum of {MAX_UNFINISHED_SESSIONS} unfinished sessions is allowed due to Supabase storage limitations. "
                 "Please generate notes for an existing session or delete it before starting a new one."
             )
 
@@ -508,8 +521,8 @@ async def process_snapshot(
         # The standalone board camera sends a new id of its own (sess_<millis>): create
         # that session for this user. An existing session must be the user's own.
         if await asyncio.to_thread(db.get_session, session_id) is None:
-            if await asyncio.to_thread(db.count_unfinished_sessions, user.id) >= 2:
-                raise HTTPException(403, "Storage limit reached: a maximum of 2 unfinished "
+            if await asyncio.to_thread(db.count_unfinished_sessions, user.id) >= MAX_UNFINISHED_SESSIONS:
+                raise HTTPException(403, f"Storage limit reached: a maximum of {MAX_UNFINISHED_SESSIONS} unfinished "
                                          "sessions is allowed. Generate notes for or delete "
                                          "an existing session first.")
             await asyncio.to_thread(db.create_session_if_missing, session_id,
@@ -563,6 +576,287 @@ async def process_snapshot(
         "people_detected": human_count,
         "note_inclusion_preference": note_preference,
         "status": "APPROVED",
+    }
+
+
+_latest_glasses_capture: dict | None = None
+
+
+def _get_most_recent_snapshot() -> dict | None:
+    """Returns the latest glasses capture, or the latest saved snapshot from disk."""
+    if _latest_glasses_capture:
+        return _latest_glasses_capture
+    try:
+        files = sorted(SNAPSHOTS_DIR.glob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            latest = files[0]
+            snap_id = latest.stem
+            text = _ocr_results.get(snap_id, ("[OCR extraction saved with slide]", 0.0))[0]
+            return {
+                "snapshot_id": snap_id,
+                "session_id": "recent_session",
+                "image_url": f"/static/snapshots/{latest.name}",
+                "extracted_text": text,
+                "ocr_status": "DONE",
+                "people_detected": 0,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest.stat().st_mtime)),
+            }
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/v1/glasses/recent-captures")
+async def glasses_recent_captures(limit: int = 20):
+    """
+    Returns the last N glasses captures as JSON so Flutter can load them
+    on startup without needing to have been connected via WebSocket at capture time.
+    Each item includes snapshot_id, image_url, extracted_text, timestamp.
+    """
+    try:
+        files = sorted(
+            SNAPSHOTS_DIR.glob("snap_glasses_*.jpg"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+    except Exception:
+        files = []
+
+    results = []
+    for f in files:
+        snap_id = f.stem
+        ocr_text, _ = _ocr_results.get(snap_id, ("[OCR extraction saved with slide]", 0.0))
+        results.append({
+            "snapshot_id": snap_id,
+            "image_url": f"/static/snapshots/{f.name}",
+            "blurred_image_url": f"/static/snapshots/{f.name}",
+            "extracted_text": ocr_text,
+            "ocr_status": "DONE",
+            "source": "esp32_cam",
+            "people_detected": 0,
+            "timestamp": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(f.stat().st_mtime)
+            ),
+        })
+    return {"captures": results, "total": len(results)}
+
+
+@app.get("/api/v1/glasses/capture")
+async def glasses_capture_status(request: Request, format: str | None = None):
+    """
+    Live Visual Monitor for AI Vision Glasses:
+    - In Browser: Displays the captured slide photo, YOLOv8 privacy blur, and extracted OCR text.
+    - As JSON: Returns system status and latest capture metadata.
+    """
+    wants_json = format == "json" or "application/json" in request.headers.get("accept", "")
+    recent = _get_most_recent_snapshot()
+
+    if wants_json:
+        return {
+            "status": "ready",
+            "endpoint": "/api/v1/glasses/capture",
+            "method": "POST",
+            "latest_capture": recent,
+            "active_session_id": pipeline.session_id if pipeline.running else None,
+            "is_recording": pipeline.running,
+        }
+
+    # Render interactive live preview HTML page for browser
+    if recent:
+        img_src = recent.get("image_url") or ""
+        ocr_text = recent.get("extracted_text") or "OCR processing…"
+        snap_id = recent.get("snapshot_id") or ""
+        ts = recent.get("timestamp") or time.strftime("%Y-%m-%d %H:%M:%S")
+        people = recent.get("people_detected", 0)
+        content_html = f"""
+        <div class="card">
+            <div class="header">
+                <span class="badge live">📸 LATEST CAPTURED SLIDE</span>
+                <span class="time">{ts}</span>
+            </div>
+            <div class="image-container">
+                <img src="{img_src}" alt="Latest Board Capture" />
+            </div>
+            <div class="info-row">
+                <span class="tag"><b>ID:</b> {snap_id}</span>
+                <span class="tag"><b>YOLOv8 Masking:</b> {people} person(s) blurred</span>
+                <a href="{img_src}" target="_blank" class="btn">Open Full Resolution ↗</a>
+            </div>
+            <div class="ocr-section">
+                <h3>📝 Extracted Board Notes & Formulas (EasyOCR):</h3>
+                <div class="ocr-box">{ocr_text}</div>
+            </div>
+        </div>
+        """
+    else:
+        content_html = """
+        <div class="card empty">
+            <div class="icon">🕶️</div>
+            <h2>AI Vision Glasses - Camera Ready</h2>
+            <p>No snapshot has been captured yet in this run.</p>
+            <p class="hint">Press the push button on your glasses (connected to <b>IO14</b>) to take a board photo.</p>
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🕶️ AI Vision Glasses - Live Camera Monitor</title>
+        <meta http-equiv="refresh" content="3">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; display: flex; flex-direction: column; align-items: center; }}
+            .container {{ max-width: 820px; width: 100%; }}
+            .title-bar {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 12px; }}
+            .title-bar h1 {{ margin: 0; font-size: 20px; color: #38bdf8; display: flex; align-items: center; gap: 8px; }}
+            .status-pill {{ background: #059669; color: white; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: bold; }}
+            .card {{ background: #1e293b; border-radius: 16px; border: 1px solid #334155; padding: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }}
+            .card.empty {{ text-align: center; padding: 60px 20px; }}
+            .card.empty .icon {{ font-size: 54px; margin-bottom: 12px; }}
+            .card.empty h2 {{ margin: 0 0 8px 0; font-size: 20px; color: #f8fafc; }}
+            .card.empty .hint {{ color: #94a3b8; font-size: 14px; margin-top: 12px; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }}
+            .badge.live {{ background: #0284c7; color: white; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }}
+            .time {{ color: #94a3b8; font-size: 12px; }}
+            .image-container {{ width: 100%; border-radius: 12px; overflow: hidden; background: #020617; border: 1px solid #475569; display: flex; justify-content: center; }}
+            .image-container img {{ max-width: 100%; max-height: 520px; object-fit: contain; }}
+            .info-row {{ display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }}
+            .tag {{ background: #334155; color: #cbd5e1; padding: 6px 12px; border-radius: 6px; font-size: 12px; }}
+            .btn {{ margin-left: auto; background: #38bdf8; color: #0f172a; text-decoration: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: bold; transition: opacity 0.2s; }}
+            .btn:hover {{ opacity: 0.85; }}
+            .ocr-section {{ margin-top: 20px; border-top: 1px solid #334155; padding-top: 14px; }}
+            .ocr-section h3 {{ margin: 0 0 8px 0; font-size: 14px; color: #cbd5e1; }}
+            .ocr-box {{ background: #0b1120; border: 1px solid #334155; border-radius: 8px; padding: 14px; font-family: monospace; font-size: 13px; line-height: 1.5; color: #38bdf8; white-space: pre-wrap; }}
+            .footer-note {{ text-align: center; margin-top: 16px; font-size: 12px; color: #64748b; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="title-bar">
+                <h1>👓 AI Vision Glasses - Live Camera Monitor</h1>
+                <span class="status-pill">● System Active</span>
+            </div>
+            {content_html}
+            <div class="footer-note">⚡ Live feed auto-refreshes every 3 seconds to display new captures instantly.</div>
+        </div>
+    </body>
+    </html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/v1/glasses/latest-image")
+async def get_latest_glasses_image():
+    """Returns the actual JPEG image file of the latest capture."""
+    recent = _get_most_recent_snapshot()
+    if recent and recent.get("image_url"):
+        local_rel = recent["image_url"].replace("/static/snapshots/", "")
+        path = SNAPSHOTS_DIR / local_rel
+        if path.exists():
+            return FileResponse(path, media_type="image/jpeg")
+    raise HTTPException(404, "No glasses image has been captured yet.")
+
+
+@app.post("/api/v1/glasses/capture")
+async def glasses_capture_endpoint(
+    request: Request,
+    session_id: str | None = None,
+    file: UploadFile | None = File(None),
+):
+    """
+    Receives an image capture directly from the ESP32-CAM (AI Vision Glasses).
+    Supports either raw JPEG payload (body) or multipart form file.
+    Does not require a Bearer token (hardware peripheral), automatically associates
+    with the currently recording studio session and the user who started it.
+    Applies YOLOv8 privacy blurring, slide enhancement, EasyOCR text extraction,
+    and broadcasts the live snapshot event with extracted text to Flutter clients.
+    """
+    # 1. Read binary image data (from raw body or multipart file)
+    if file is not None:
+        contents = await file.read()
+    else:
+        contents = await request.body()
+
+    if not contents:
+        raise HTTPException(400, "Empty image payload received from glasses.")
+
+    try:
+        np_arr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(400, "Invalid image data received from ESP32-CAM.")
+    except Exception as e:
+        raise HTTPException(400, f"Error decoding glasses image: {e}")
+
+    # 2. Determine target session: active running studio session takes precedence
+    target_session_id = session_id
+    if not target_session_id and pipeline.running and pipeline.session_id:
+        target_session_id = pipeline.session_id
+
+    # Resolve owner from active recording session manager
+    owner_id = manager.owners.get(target_session_id) if target_session_id else None
+    if not owner_id:
+        owner_id = "default_user"
+
+    if not target_session_id:
+        target_session_id = f"sess_glasses_{uuid.uuid4().hex[:8]}"
+        await asyncio.to_thread(db.create_session_if_missing, target_session_id, "Glasses Lecture Session", owner_id)
+
+    snapshot_id = f"snap_glasses_{uuid.uuid4().hex[:8]}"
+
+    # Calculate timeline second trigger (synchronized with audio studio recording)
+    second = 0.0
+    if pipeline.running and getattr(pipeline, "start_time", None):
+        second = round(time.time() - pipeline.start_time, 1)
+
+    # 3. Vision processing on worker pool: YOLOv8 blur + enhancement + local/Supabase save
+    loop = asyncio.get_running_loop()
+    processed_frame, human_count, human_mask, local_image_url = await loop.run_in_executor(
+        _vision_pool, _blur_enhance_save, frame, snapshot_id, target_session_id,
+        "full_body", "magic_color", "BOTH"
+    )
+
+    # 4. Background OCR processing
+    if ocr is not None:
+        _start_ocr(snapshot_id, target_session_id, processed_frame, human_mask, "BOTH")
+        extracted_text, ocr_status = OCR_PENDING_TEXT, "PENDING"
+    else:
+        extracted_text, ocr_status = "[OCR module not available]", "DONE"
+
+    # 5. Broadcast real-time event to Flutter (glasses_snapshot & snapshot_captured)
+    event_data = {
+        "type": "glasses_snapshot",
+        "snapshot_id": snapshot_id,
+        "session_id": target_session_id,
+        "source": "esp32_cam",
+        "title": f"Glasses Capture ({int(second)}s)",
+        "blurred_image_url": local_image_url,
+        "image_url": local_image_url,
+        "extracted_text": extracted_text,
+        "ocr_status": ocr_status,
+        "people_detected": human_count,
+        "confidence_score": 0.0,
+        "captured_at_second": second,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    await manager.broadcast(event_data)
+    await manager.broadcast({**event_data, "type": "snapshot_captured"})
+
+    global _latest_glasses_capture
+    _latest_glasses_capture = dict(event_data)
+
+    log.info("Glasses capture %s processed for session %s (second: %.1f)",
+             snapshot_id, target_session_id, second)
+
+    return {
+        "status": "ok",
+        "snapshot_id": snapshot_id,
+        "session_id": target_session_id,
+        "source": "esp32_cam",
+        "blurred_image_url": local_image_url,
+        "extracted_text": extracted_text,
+        "ocr_status": ocr_status,
+        "captured_at_second": second,
     }
 
 
@@ -646,6 +940,10 @@ def _start_ocr(snapshot_id, session_id, frame, human_mask, note_preference):
         _store_ocr_result(snapshot_id, text, conf)
         _ocr_jobs.pop(snapshot_id, None)
         _ocr_job_session.pop(snapshot_id, None)
+        global _latest_glasses_capture
+        if _latest_glasses_capture and _latest_glasses_capture.get("snapshot_id") == snapshot_id:
+            _latest_glasses_capture["extracted_text"] = text
+            _latest_glasses_capture["ocr_status"] = "DONE"
         await manager.broadcast({
             "type": "ocr_ready", "snapshot_id": snapshot_id, "session_id": session_id,
             "extracted_text": text, "confidence_score": round(conf, 2),

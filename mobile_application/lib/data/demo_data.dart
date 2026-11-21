@@ -25,8 +25,8 @@ class DemoData {
 
   static bool isSyncing = false;
 
-  /// Scenario 2: Maximum of 2 unfinished sessions can be saved per user.
-  static const int maxUnfinishedSessions = 2;
+  /// Scenario 2: Maximum of 5 unfinished sessions can be saved per user.
+  static const int maxUnfinishedSessions = 5;
 
   /// Number of active sessions stored that do not have generated notes yet.
   static int get unfinishedSessionCount =>

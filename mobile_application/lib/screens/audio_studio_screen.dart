@@ -1,14 +1,18 @@
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/api_config.dart';
 import '../services/audio_service.dart';
 import '../services/notes_job_service.dart';
+import '../services/vision_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'board_camera_screen.dart';
@@ -160,6 +164,65 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
             );
           }
         });
+      } else if (type == 'glasses_snapshot' || type == 'snapshot_captured') {
+        // Real-time slide capture from ESP32-CAM (AI Vision Glasses) or backend camera
+        final snapId = (data['snapshot_id'] ?? '').toString();
+        if (snapId.isEmpty) return;
+
+        // Prevent adding duplicate entries if both events fire
+        final alreadyPresent =
+            sessionCapturedImages.any((img) => img.snapshotId == snapId);
+        if (alreadyPresent) return;
+
+        final rawUrl = (data['blurred_image_url'] ??
+                data['image_url'] ??
+                '/static/snapshots/$snapId.jpg')
+            .toString();
+        final fullImageUrl = ApiConfig().resolveUrl(rawUrl).toString();
+        final extracted = (data['extracted_text'] ??
+                CapturedImageItem.ocrPendingText)
+            .toString();
+        final sec = (data['captured_at_second'] as num?)?.toInt() ?? seconds;
+        final isGlasses = (data['source'] == 'esp32_cam') ||
+            (type == 'glasses_snapshot') ||
+            snapId.contains('glasses');
+        final count = sessionCapturedImages.length + 1;
+        final itemTitle = (data['title'] ??
+                (isGlasses
+                    ? 'Glasses Capture #$count'
+                    : 'Board Capture #$count'))
+            .toString();
+
+        final newItem = CapturedImageItem(
+          id: DateTime.now().millisecondsSinceEpoch,
+          snapshotId: snapId,
+          title: itemTitle,
+          ocrText: extracted,
+          option: BoardImageOption.both,
+          capturedAtSecond: sec,
+          remoteImageUrl: fullImageUrl,
+          peopleDetected: (data['people_detected'] as num?)?.toInt() ?? 0,
+        );
+
+        setState(() {
+          sessionCapturedImages.add(newItem);
+        });
+
+        // Watch background OCR worker for finished text
+        VisionService().watchOcr(snapId);
+      } else if (type == 'ocr_ready') {
+        // Background EasyOCR finished: update slide text live!
+        final snapId = (data['snapshot_id'] ?? '').toString();
+        final text = (data['extracted_text'] ?? '').toString().trim();
+        if (snapId.isNotEmpty && text.isNotEmpty) {
+          setState(() {
+            for (final item in sessionCapturedImages) {
+              if (item.snapshotId == snapId) {
+                item.ocrText = text;
+              }
+            }
+          });
+        }
       }
     });
   }
@@ -1075,17 +1138,31 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     bool isDark,
     ThemeData theme,
   ) {
+    final isGlasses = img.title.contains('Glasses') ||
+        (img.snapshotId?.contains('glasses') == true);
+    final cardBorderColor = isGlasses
+        ? AppTheme.accentTeal.withValues(alpha: 0.5)
+        : primaryCol.withValues(alpha: 0.45);
+    final headerBgColor = isGlasses
+        ? AppTheme.accentTeal.withValues(alpha: 0.15)
+        : primaryCol.withValues(alpha: 0.12);
+    final badgeColor = isGlasses ? AppTheme.accentTeal : primaryCol;
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: primaryCol.withValues(alpha: 0.45),
+          color: cardBorderColor,
           width: 1.5,
         ),
         color: isDark
-            ? primaryCol.withValues(alpha: 0.06)
-            : primaryCol.withValues(alpha: 0.03),
+            ? (isGlasses
+                ? AppTheme.accentTeal.withValues(alpha: 0.05)
+                : primaryCol.withValues(alpha: 0.06))
+            : (isGlasses
+                ? AppTheme.accentTeal.withValues(alpha: 0.03)
+                : primaryCol.withValues(alpha: 0.03)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1093,14 +1170,18 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: primaryCol.withValues(alpha: 0.12),
+              color: headerBgColor,
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(10),
               ),
             ),
             child: Row(
               children: [
-                Icon(Icons.camera_alt_outlined, size: 15, color: primaryCol),
+                Icon(
+                  isGlasses ? Icons.visibility_outlined : Icons.camera_alt_outlined,
+                  size: 16,
+                  color: badgeColor,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -1108,7 +1189,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 12,
-                      color: primaryCol,
+                      color: badgeColor,
                     ),
                   ),
                 ),
@@ -1118,7 +1199,26 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: primaryCol.withValues(alpha: 0.2),
+                    color: badgeColor.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    isGlasses ? '🕶️ Glasses' : '📱 Camera',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: badgeColor,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -1126,7 +1226,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
-                      color: primaryCol,
+                      color: badgeColor,
                     ),
                   ),
                 ),
@@ -1169,7 +1269,24 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           ),
           Padding(
             padding: const EdgeInsets.all(10),
-            child: BoardPreviewWidget(item: img, compact: true),
+            child: BoardPreviewWidget(
+              item: img,
+              compact: true,
+              showOptionsSelector: true,
+              onOptionChanged: (newOpt) {
+                setState(() {
+                  img.option = newOpt;
+                });
+                if (img.snapshotId != null) {
+                  final prefStr = newOpt == BoardImageOption.ocr
+                      ? 'OCR_TEXT_ONLY'
+                      : (newOpt == BoardImageOption.imageAsIs
+                          ? 'IMAGE_ONLY'
+                          : 'BOTH');
+                  VisionService().updatePreference(img.snapshotId!, prefStr);
+                }
+              },
+            ),
           ),
         ],
       ),
@@ -1606,13 +1723,57 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                       ),
                     ),
                   const SizedBox(height: 10),
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppTheme.accentTeal.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: AppTheme.accentTeal.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.visibility_outlined,
+                          color: AppTheme.accentTeal,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Text(
+                                'AI Vision Glasses (ESP32-CAM) Connected',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppTheme.accentTeal,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Press the push button on your glasses to capture slides in real-time.',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: AppTheme.mutedText,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
                       onPressed: openCameraToCaptureImage,
                       icon: const Icon(Icons.camera_alt_outlined),
                       label: const Text(
-                        'Capture Board Image (With Side Transcripts & 3 Options)',
+                        'Take Photo from Phone / Upload Image File',
                       ),
                     ),
                   ),
