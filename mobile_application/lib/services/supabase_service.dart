@@ -76,15 +76,33 @@ class SupabaseService {
         final createdAt = rawCreated != null ? DateTime.tryParse(rawCreated) : null;
         final baseEpoch = createdAt != null ? (createdAt.millisecondsSinceEpoch / 1000.0) : null;
 
-        // Fetch associated chunks and snapshots together
-        final lines = await _fetchSessionChunks(sessionId, baseEpoch: baseEpoch);
-        final images = await _fetchSessionImages(sessionId, baseEpoch: baseEpoch);
+        // Fetch associated chunks and snapshots together in parallel
+        final results = await Future.wait([
+          _fetchSessionChunks(sessionId, baseEpoch: baseEpoch),
+          _fetchSessionImages(sessionId, baseEpoch: baseEpoch),
+        ]);
+        final lines = results[0] as List<TranscriptLineItem>;
+        final images = results[1] as List<CapturedImageItem>;
 
         // If notes have been generated and raw inputs were discarded (no chunks and no images),
         // then this session has no inputs to show in Saved Inputs (its document is in Saved Notes).
         if (isNotesGenerated && lines.isEmpty && images.isEmpty && (row['raw_content'] == null || (row['raw_content'] as String).isEmpty)) {
           continue;
         }
+
+        // Calculate audio duration from chunks if not explicitly stored
+        String? audioDuration = row['audio_duration'] as String?;
+        if ((audioDuration == null || audioDuration.isEmpty) && lines.isNotEmpty) {
+          final maxSec = lines.map((l) => l.secondTrigger).fold<int>(0, (prev, s) => s > prev ? s : prev);
+          final mins = (maxSec ~/ 60).toString().padLeft(2, '0');
+          final secs = (maxSec % 60).toString().padLeft(2, '0');
+          audioDuration = '$mins:$secs';
+        }
+
+        final rawContent = row['raw_content'] as String?;
+        final content = (rawContent != null && rawContent.trim().isNotEmpty)
+            ? rawContent
+            : lines.map((l) => l.formatted).join('\n');
 
         rawList.add(
           SavedInput(
@@ -93,9 +111,9 @@ class SupabaseService {
             userId: row['user_id'] as String? ?? userId,
             title: row['title'] as String? ?? 'Untitled Session',
             type: row['input_type'] as String? ?? 'Workshop Session',
-            content: row['raw_content'] as String? ?? '',
+            content: content,
             notesGenerated: isNotesGenerated,
-            audioDuration: row['audio_duration'] as String?,
+            audioDuration: audioDuration,
             expiresAt: expiresAt,
             createdAt: createdAt,
             transcriptLines: lines,
@@ -201,6 +219,28 @@ class SupabaseService {
       final List<dynamic> snapshots = jsonDecode(response.body);
       final List<CapturedImageItem> items = [];
 
+      // Fetch all OCR extractions for these snapshots in a single batch query:
+      final Map<String, String> ocrMap = {};
+      final Map<String, double?> confMap = {};
+      final snapIds = snapshots.map((s) => s['snapshot_id'] as String?).whereType<String>().toList();
+      if (snapIds.isNotEmpty) {
+        try {
+          final idsParam = snapIds.map(Uri.encodeQueryComponent).join(',');
+          final ocrUri = Uri.parse('$supabaseUrl/rest/v1/ocr_extractions?snapshot_id=in.($idsParam)');
+          final ocrResp = await http.get(ocrUri, headers: await _headers).timeout(const Duration(seconds: 8));
+          if (ocrResp.statusCode == 200) {
+            final List<dynamic> ocrData = jsonDecode(ocrResp.body);
+            for (final row in ocrData) {
+              final snapId = row['snapshot_id'] as String?;
+              if (snapId != null) {
+                ocrMap[snapId] = row['extracted_text'] as String? ?? '';
+                confMap[snapId] = (row['confidence_score'] as num?)?.toDouble();
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
       for (int i = 0; i < snapshots.length; i++) {
         final s = snapshots[i];
         final snapId = s['snapshot_id'] as String;
@@ -213,22 +253,8 @@ class SupabaseService {
                 ? BoardImageOption.ocr
                 : BoardImageOption.both;
 
-        // Fetch OCR text if available
-        String ocrText = '';
-        double? confidence;
-        try {
-          final ocrUri = Uri.parse(
-            '$supabaseUrl/rest/v1/ocr_extractions?snapshot_id=eq.$snapId&limit=1',
-          );
-          final ocrResp = await http.get(ocrUri, headers: await _headers).timeout(const Duration(seconds: 5));
-          if (ocrResp.statusCode == 200) {
-            final List<dynamic> ocrData = jsonDecode(ocrResp.body);
-            if (ocrData.isNotEmpty) {
-              ocrText = ocrData[0]['extracted_text'] as String? ?? '';
-              confidence = (ocrData[0]['confidence_score'] as num?)?.toDouble();
-            }
-          }
-        } catch (_) {}
+        final ocrText = ocrMap[snapId] ?? '';
+        final confidence = confMap[snapId];
 
         final filepath = s['blurred_filepath'] as String? ?? '';
         items.add(
@@ -574,6 +600,7 @@ class SupabaseService {
   // ===========================================================================
 
   /// Fetches all generated notes for a user from Supabase.
+  /// Automatically deduplicates multiple note records for the same session (e.g. legacy duplicates).
   Future<List<DemoNote>> fetchUserNotes(String userId) async {
     try {
       final userFilter = userId.trim().isNotEmpty
@@ -586,19 +613,35 @@ class SupabaseService {
 
       final List<dynamic> data = jsonDecode(response.body);
       final List<DemoNote> notes = [];
+      final Set<String> seenSessions = {};
 
       for (int i = 0; i < data.length; i++) {
         final row = data[i];
+        final sessionId = row['session_id'] as String?;
+
+        // If multiple note records exist for the exact same session, keep only the first (newest) one
+        if (sessionId != null && sessionId.isNotEmpty) {
+          if (seenSessions.contains(sessionId)) {
+            continue;
+          }
+          seenSessions.add(sessionId);
+        }
+
         final rawCreated = row['created_at'] as String?;
         final createdAt = rawCreated != null ? DateTime.tryParse(rawCreated) : null;
+        final rawTitle = row['title'] as String? ?? 'Untitled Note';
+        // Normalize any legacy "- Comprehensive Notes" title suffix so notes display cleanly
+        final cleanTitle = rawTitle.endsWith(' - Comprehensive Notes')
+            ? rawTitle.substring(0, rawTitle.length - ' - Comprehensive Notes'.length)
+            : rawTitle;
 
         notes.add(
           DemoNote(
-            id: i + 1,
+            id: notes.length + 1,
             noteId: row['note_id'] as String?,
-            sessionId: row['session_id'] as String?,
+            sessionId: sessionId,
             userId: row['user_id'] as String?,
-            title: row['title'] as String? ?? 'Untitled Note',
+            title: cleanTitle,
             content: row['markdown_content'] as String? ?? '',
             type: 'Workshop Session Notes',
             isSatisfactory: row['is_satisfactory'] as bool?,

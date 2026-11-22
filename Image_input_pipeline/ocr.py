@@ -57,7 +57,8 @@ def save_ocr_to_supabase(snapshot_id, session_id, extracted_text, confidence_sco
         "ocr_id": str(uuid.uuid4()),
         "snapshot_id": snapshot_id,
         "extracted_text": extracted_text,
-        "confidence_score": float(confidence_score)
+        "confidence_score": float(confidence_score),
+        "session_id": session_id,
     }
     
     try:

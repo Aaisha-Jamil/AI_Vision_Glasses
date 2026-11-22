@@ -20,7 +20,7 @@ class DemoNote {
   bool? isSatisfactory;
   String title;
   String content;
-  final String type;
+  String type;
   String? docxUrl;
   String? docxPath;
   final DateTime createdAt;

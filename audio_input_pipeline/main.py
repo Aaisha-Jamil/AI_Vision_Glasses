@@ -20,6 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+import httpx
 
 # Ensure local pipeline modules can be imported regardless of execution working directory
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -580,6 +581,8 @@ async def process_snapshot(
 
 
 _latest_glasses_capture: dict | None = None
+_last_glasses_ip: str | None = None
+_last_glasses_seen: float = 0.0
 
 
 def _get_most_recent_snapshot() -> dict | None:
@@ -842,8 +845,11 @@ async def glasses_capture_endpoint(
     await manager.broadcast(event_data)
     await manager.broadcast({**event_data, "type": "snapshot_captured"})
 
-    global _latest_glasses_capture
+    global _latest_glasses_capture, _last_glasses_ip, _last_glasses_seen
     _latest_glasses_capture = dict(event_data)
+    if request.client and request.client.host:
+        _last_glasses_ip = request.client.host
+    _last_glasses_seen = time.time()
 
     log.info("Glasses capture %s processed for session %s (second: %.1f)",
              snapshot_id, target_session_id, second)
@@ -857,6 +863,126 @@ async def glasses_capture_endpoint(
         "extracted_text": extracted_text,
         "ocr_status": ocr_status,
         "captured_at_second": second,
+    }
+
+
+@app.get("/api/v1/glasses/heartbeat")
+@app.post("/api/v1/glasses/heartbeat")
+async def glasses_heartbeat(request: Request, ip: str | None = None):
+    """
+    Heartbeat endpoint for ESP32-CAM glasses to register their IP on boot/periodically.
+    """
+    global _last_glasses_ip, _last_glasses_seen
+    client_ip = ip or (request.client.host if request.client else None)
+    if client_ip:
+        _last_glasses_ip = client_ip
+    _last_glasses_seen = time.time()
+    return {"status": "ok", "recorded_ip": _last_glasses_ip}
+
+
+def _detect_usb_glasses() -> str | None:
+    """Detects if ESP32-CAM (CH340/CP2102) is connected via USB COM port."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM")
+        ports = []
+        for i in range(winreg.QueryInfoKey(key)[1]):
+            ports.append(winreg.EnumValue(key, i)[1])
+        winreg.CloseKey(key)
+        if ports:
+            return ports[0]  # e.g. "COM5"
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/v1/glasses/status")
+async def get_glasses_status(ip: str | None = None):
+    """
+    Checks if ESP32-CAM glasses are connected.
+    Detects hardware via:
+    1. USB Serial Port (e.g. COM5) if plugged directly into the host PC.
+    2. Wi-Fi HTTP ping to target IP, last known IP, or ai-glasses.local.
+    3. Recent capture received within the last 10 minutes.
+    """
+    usb_port = _detect_usb_glasses()
+    target_ip = ip or _last_glasses_ip
+    is_wifi_online = False
+    details = {}
+    probe_error = None
+
+    if target_ip:
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                resp = await client.get(f"http://{target_ip}/status")
+                if resp.status_code == 200:
+                    is_wifi_online = True
+                    try:
+                        details = resp.json()
+                    except Exception:
+                        pass
+        except Exception as e:
+            probe_error = f"{type(e).__name__}: {e}"
+            is_wifi_online = False
+
+    # Fallback to mDNS ai-glasses.local if target_ip is unset or unreachable
+    if not is_wifi_online and not ip:
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                resp = await client.get("http://ai-glasses.local/status")
+                if resp.status_code == 200:
+                    is_wifi_online = True
+                    try:
+                        details = resp.json()
+                    except Exception:
+                        pass
+                    target_ip = "ai-glasses.local"
+        except Exception as e:
+            if not probe_error:
+                probe_error = f"{type(e).__name__}: {e}"
+
+    # Check if a capture was received within the last 15 minutes (in memory or on disk)
+    recently_seen = False
+    secs_ago = int(time.time() - _last_glasses_seen) if _last_glasses_seen > 0 else None
+    if secs_ago is not None and secs_ago < 900:
+        recently_seen = True
+    elif secs_ago is None:
+        try:
+            glasses_snaps = sorted(
+                SNAPSHOTS_DIR.glob("snap_glasses_*.jpg"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if glasses_snaps:
+                file_age = int(time.time() - glasses_snaps[0].stat().st_mtime)
+                if file_age < 900:
+                    recently_seen = True
+                    secs_ago = file_age
+        except Exception:
+            pass
+
+    is_connected = bool(usb_port) or is_wifi_online or recently_seen
+
+    # Build human-readable connection mode
+    modes = []
+    if usb_port:
+        modes.append(f"USB ({usb_port})")
+    if is_wifi_online:
+        modes.append(f"Wi-Fi ({target_ip})")
+    elif recently_seen:
+        modes.append(f"Ready (Recent Capture {secs_ago}s ago)")
+
+    connection_label = " & ".join(modes) if modes else "Offline"
+
+    return {
+        "connected": is_connected,
+        "usb_port": usb_port,
+        "wifi_connected": is_wifi_online,
+        "glasses_ip": target_ip if is_wifi_online else None,
+        "connection_mode": connection_label,
+        "last_seen_seconds_ago": secs_ago,
+        "probe_error": probe_error,
+        "details": details,
     }
 
 

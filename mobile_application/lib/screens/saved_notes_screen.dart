@@ -105,37 +105,6 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
 
   Future<void> downloadDocx(DemoNote note) => downloadNoteDocx(context, note);
 
-  void requestExport(String format) {
-    if (format == 'Markdown') {
-      if (DemoData.notes.isEmpty) {
-        showMessage(context, 'No notes available to export.');
-        return;
-      }
-      showMessage(
-        context,
-        'Exporting Markdown for ${DemoData.notes.length} note(s). Markdown structure is preserved.',
-      );
-    } else if (format == 'DOCX') {
-      final docxNotes = DemoData.notes.where((n) => n.docxUrl != null && n.docxUrl!.isNotEmpty).toList();
-      if (docxNotes.isNotEmpty) {
-        showMessage(
-          context,
-          'Found ${docxNotes.length} synthesized .docx document(s) in cloud storage/local disk.',
-        );
-      } else {
-        showMessage(
-          context,
-          'Generate notes from a lecture session to synthesize a Word .docx document.',
-        );
-      }
-    } else {
-      showMessage(
-        context,
-        '$format export: Your synthesized notes remain securely stored in Supabase.',
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -261,41 +230,6 @@ class _SavedNotesScreenState extends State<SavedNotesScreen> {
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 14),
-          const Text(
-            'Export options',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () => requestExport('PDF'),
-                icon: const Icon(Icons.picture_as_pdf),
-                label: const Text('Export PDF'),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => requestExport('DOCX'),
-                icon: const Icon(Icons.description),
-                label: const Text('Export DOCX'),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => requestExport('Markdown'),
-                icon: const Icon(Icons.code),
-                label: const Text('Export Markdown'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            'Export buttons are placeholders; they do not create files.',
-            style: TextStyle(fontSize: 12),
           ),
         ],
       ),

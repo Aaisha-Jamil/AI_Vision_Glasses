@@ -10,66 +10,70 @@
 2. [System Architecture & Communication](#-system-architecture--communication)
 3. [Repository Structure](#-repository-structure)
 4. [Teammate Contribution & Integration Analysis](#-teammate-contribution--integration-analysis)
-5. [Prerequisites & System Requirements](#-prerequisites--system-requirements)
-6. [Step-by-Step Installation & Setup](#-step-by-step-installation--setup)
-7. [Comprehensive Testing & Verification Guide](#-comprehensive-testing--verification-guide)
-8. [Current Features, Limitations & Roadmap](#-current-features-limitations--roadmap)
-9. [Authors & Contributors](#-authors--contributors)
+5. [Hardware Setup & ESP32-CAM Smart Glasses](#-hardware-setup--esp32-cam-smart-glasses)
+6. [Prerequisites & System Requirements](#-prerequisites--system-requirements)
+7. [Step-by-Step Installation & Setup](#-step-by-step-installation--setup)
+8. [Comprehensive Testing & Verification Guide](#-comprehensive-testing--verification-guide)
+9. [Current Features, Limitations & Roadmap](#-current-features-limitations--roadmap)
+10. [Authors & Contributors](#-authors--contributors)
 
 ---
 
 ## 🌟 Project Overview
 
-**AI Vision Glasses** is an end-to-end multi-modal note-taking platform designed for educational and professional environments (lectures, seminars, workshops). It bridges three core subsystems:
+**AI Vision Glasses** is an end-to-end multi-modal note-taking platform designed for educational and professional environments (lectures, seminars, workshops). It bridges four core subsystems:
 
-1. **Vision Pipeline (`Image_input_pipeline/`)**: Captures board/presentation slides, identifies and blurs human presence (faces/bodies) using a fine-tuned **YOLOv8** model for privacy compliance, enhances slide contrast, and extracts text using **EasyOCR**.
-2. **Audio Pipeline (`audio_input_pipeline/`)**: Transcribes lecture speech in real-time using **Groq Whisper-large-v3** or local **faster-whisper**, applies semantic embeddings (**SentenceTransformers**) and LLM guards to filter off-topic banter/noise, and chunks audio into structured containers.
-3. **Mobile & Web Client (`mobile_application/`)**: A cross-platform **Flutter** application (Web, Android, Desktop) providing real-time studio recording, privacy preview, synchronized chronological feeds, notes generation, and complete cloud synchronization with **Supabase**.
+1. **Smart Hardware Peripheral (`esp32_cam_firmware/`)**: An ESP32-CAM module mounted on smart glasses with an integrated push button for one-touch physical board slide capture, local PSRAM caching, and Wi-Fi streaming.
+2. **Vision Pipeline (`Image_input_pipeline/`)**: Captures board/presentation slides, identifies and blurs human presence (faces/bodies) using a fine-tuned **YOLOv8** model for privacy compliance, enhances slide contrast, and extracts text using **EasyOCR**.
+3. **Audio Pipeline (`audio_input_pipeline/`)**: Transcribes lecture speech in real-time using **Groq Whisper-large-v3** or local **faster-whisper**, applies semantic embeddings (**SentenceTransformers**) and LLM guards to filter off-topic banter/noise, and chunks audio into structured containers.
+4. **Mobile & Web Client (`mobile_application/`)**: A cross-platform **Flutter** application (Web, Android, Desktop) providing real-time studio recording, privacy preview, synchronized chronological feeds, notes generation, and complete cloud synchronization with **Supabase**.
 
 ---
 
 ## 🔄 System Architecture & Communication
 
-The diagram below illustrates how all three subsystems communicate:
+The diagram below illustrates how all four subsystems communicate:
 
 ```
-                      +---------------------------------------+
-                      |       Flutter Client Application      |
-                      |  (Web / Android / Windows Desktop)    |
-                      +---+-------------------------------+---+
-                          |                               |
-          Direct REST     |                               | WebSocket & REST
-          & Supabase SDK  |                               | (Live Audio / Snapshots)
-                          v                               v
-        +----------------------------+     +-------------------------------+
-        |      Supabase Cloud        |     |     FastAPI Python Backend    |
-        |                            |     |   (audio_input_pipeline)      |
-        | - PostgreSQL + pgvector    |<--->| - Port: 8000                  |
-        | - Auth & Row-Level Security|     | - WebSocket: /ws/transcript   |
-        | - Storage: lecture-audio   |     | - In-memory / Postgres Fallback|
-        | - Storage: lecture-slides  |     +---------------+---------------+
-        +----------------------------+                     |
-                                                           | Direct Python Import
-                                                           v
-                                           +-------------------------------+
-                                           |      Vision & OCR Subsystem   |
-                                           |    (Image_input_pipeline)     |
-                                           | - YOLOv8 Privacy Blurring     |
-                                           | - Slide Contrast Enhancement  |
-                                           | - EasyOCR Text Extraction     |
-                                           +-------------------------------+
+  +-----------------------------------+
+  |  ESP32-CAM Smart Glasses (HW)     |
+  |  - Push Button Trigger (IO14)     |
+  |  - OV2640 2MP Camera Sensor       |
+  |  - PSRAM Buffer & Embedded Web UI |
+  +-----------------+-----------------+
+                    |
+                    | Wi-Fi HTTP POST (/api/v1/glasses/capture)
+                    v
+  +-----------------------------------+        WebSocket & REST        +-----------------------------------+
+  |      FastAPI Python Backend       |<------------------------------>|     Flutter Client Application    |
+  |      (audio_input_pipeline)       |    (Live Transcripts/Photos)   |  (Web / Android / Windows Desktop)|
+  | - Port: 8000                      |                                +-----------------+-----------------+
+  | - WebSocket: /ws/transcript       |                                                  |
+  | - In-memory / Postgres Fallback   |                                                  | Direct REST &
+  +--------+------------------+-------+                                                  | Supabase SDK
+           |                  |                                                          v
+           | Direct Import    | Database & Storage Sync                +-----------------------------------+
+           v                  +--------------------------------------->|          Supabase Cloud           |
+  +---------------------------+                                        | - PostgreSQL + pgvector           |
+  |   Vision & OCR Subsystem  |                                        | - Auth & Row-Level Security       |
+  |   (Image_input_pipeline)  |                                        | - Storage: lecture-audio & slides |
+  | - YOLOv8 Privacy Blurring |                                        +-----------------------------------+
+  | - Contrast Enhancement    |
+  | - EasyOCR Text Extraction |
+  +---------------------------+
 ```
 
 ### Communication Protocols & Data Flow:
 
-1. **Audio Streaming & Control**:
+1. **Smart Glasses Board Capture (Hardware)**:
+   - When the user presses the push button on pin **IO14**, the ESP32-CAM captures a high-resolution frame into PSRAM and dispatches an HTTP POST request to `http://<backend-ip>:8000/api/v1/glasses/capture`.
+   - The backend runs YOLOv8 privacy blur (masking faces/bodies), slide contrast enhancement, and EasyOCR text extraction, saving the resulting snapshot to Supabase and broadcasting a `glasses_snapshot` event to all active Flutter clients.
+2. **Audio Streaming & Noise Filtering**:
    - Flutter establishes a WebSocket connection with FastAPI at `ws://localhost:8000/ws/transcript`.
-   - The Python backend captures microphone input or audio buffers, performs Speech-to-Text via Groq or Faster-Whisper, scores semantic relevance against the seminar topic, and broadcasts transcribed chunks back to the Flutter UI in real-time.
-2. **Board Snapshots & Vision Processing**:
-   - The Flutter camera screen captures a slide photo and dispatches it via multipart HTTP POST to `http://localhost:8000/api/v1/vision/process-snapshot`.
-   - FastAPI invokes `PrivacyModel.apply_privacy_blur()` (YOLOv8) to mask individuals, runs `enhance_slide()` for contrast enhancement, and triggers `ocr.process_ocr_worker()` to extract board formulas/notes.
-   - The processed snapshot and OCR metadata are stored in Supabase (`image_snapshots` and `ocr_extractions`), saved locally in `static/snapshots/`, and broadcast across WebSocket clients.
-3. **Data Persistence & Note Generation**:
+   - The Python backend captures audio input or buffers, performs Speech-to-Text via Groq or Faster-Whisper, scores semantic relevance against the seminar topic (SentenceTransformers), and streams clean transcription chunks to the Flutter UI in real-time.
+3. **Mobile Board Camera Fallback**:
+   - Users without the glasses can also take photos directly from their phone camera in the Flutter app via `POST /api/v1/vision/process-snapshot`.
+4. **Data Persistence & Note Generation**:
    - Both Flutter and the Python backend communicate with Supabase via REST / PostgreSQL.
    - Flutter manages sessions, manual user edits, and generated notes through `SupabaseService`.
    - Audio chunks and slide images are archived in Supabase Cloud Storage buckets (`lecture-audio` and `lecture-slides`).
@@ -106,6 +110,10 @@ AI_Vision_Glasses/
 │   ├── static/                      # Web dashboard & local snapshot storage
 │   ├── tools/                       # Audio recording & STT diagnostic utilities
 │   └── requirements.txt             # Audio-specific dependencies
+│
+├── esp32_cam_firmware/              # Smart glasses hardware client firmware (v2.0)
+│   ├── esp32_cam_firmware.ino       # Arduino C++ firmware (Wi-Fi, PSRAM cache, HTTP server)
+│   └── README.md                    # Hardware flashing, pinout, and web portal documentation
 │
 └── mobile_application/              # [Contributed by Nawal Abid & Aaisha Jamil]
     ├── lib/
@@ -173,6 +181,112 @@ The repository unites three independently developed modules. All original core a
 - **Cloud Services & Session Management**: Built the comprehensive `SupabaseService` layer with offline caching, resilience, and authored multi-user session management SQL schemas (`migration_session_management.sql`).
 - **Cross-Platform & QA**: Engineered conditional web/native image loaders (`image_loader_*.dart`), automated smoke testing suites, and project health checks.
 - **Security & Infrastructure**: Configured root `.gitignore`, environment templates (`.env.example`), consolidated dependencies (`requirements.txt`), and documentation.
+
+---
+
+## 👓 Hardware Setup & ESP32-CAM Smart Glasses
+
+The physical smart-glasses peripheral captures high-resolution board slides on-demand when the user presses the frame-mounted tactile button.
+
+### 1. Bill of Materials (BOM) & Components
+| Component | Specification | Purpose |
+| :--- | :--- | :--- |
+| **Microcontroller / Camera** | **AI-Thinker ESP32-CAM** (OV2640 2MP, 4MB PSRAM) | On-glasses image sensor, Wi-Fi radio, and local frame buffer |
+| **USB Programmer Shield** | **ESP32-CAM-MB** (CH340 Micro-USB) | Power supply, serial flashing, and USB communication |
+| **Trigger Switch** | Momentary Push Button (Normally Open, 6x6mm) | Mounted on glasses arm for single-click slide capture |
+| **Power Source** | 5V Power Bank / Micro-USB Cable (or 3.7V LiPo + 5V boost) | Supplies stable power (minimum 1A recommended for Wi-Fi bursts) |
+| **Eyewear Frame** | Standard glasses / 3D-printed clip-on mount | Houses the ESP32-CAM and trigger button at eye level |
+
+---
+
+### 2. Wiring & Pinout Diagram
+
+The trigger switch connects directly to GPIO 14 (**IO14**) and **GND**. The internal pull-up resistor is enabled in firmware, so no external resistor is required.
+
+```text
+       +--------------------------------------------+
+       |             ESP32-CAM Module               |
+       |                                            |
+       |  [OV2640 Lens]                             |
+       |                                            |
+       |         [IO14 / GPIO 14] -----------+      |
+       |         [GND]            -----+     |      |
+       +-------------------------------+-----+------+
+                                       |     |
+                                    +--+--+  |
+                                    |     |  |
+                                    | [o] |--+  <-- Push Button (Normally Open)
+                                    |     |
+                                    +-----+
+```
+
+* **IO14 (GPIO 14)**: Connected to Pin 1 of the Push Button (active LOW, triggered on press).
+* **GND**: Connected to Pin 2 of the Push Button.
+* **5V & GND**: Powered via the ESP32-CAM-MB daughterboard via standard Micro-USB cable.
+
+---
+
+### 3. Arduino IDE Setup & Firmware Flashing
+
+1. Install the **ESP32 Board Package** in Arduino IDE (`Boards Manager` -> search for `esp32` by Espressif Systems).
+2. Open `esp32_cam_firmware/esp32_cam_firmware.ino`.
+3. Configure the **Tools** menu settings:
+   - **Board**: `AI Thinker ESP32-CAM`
+   - **CPU Frequency**: `240MHz (WiFi/BT)`
+   - **Flash Frequency**: `80MHz`
+   - **Flash Mode**: `QIO`
+   - **Partition Scheme**: `Huge APP (3MB No OTA/1MB SPIFFS)` *(Crucial: required for high-resolution UXGA image buffers!)*
+   - **Port**: Select the COM port of your connected ESP32-CAM-MB (e.g. `COM5`).
+4. (Optional) Set your default Wi-Fi SSID and Password on lines 67-68:
+   ```cpp
+   const char* DEFAULT_SSID = "Your_WiFi_SSID";
+   const char* DEFAULT_PASS = "Your_WiFi_Password";
+   ```
+5. Click **Upload**.
+6. Once uploaded, open the **Serial Monitor** at **115200 baud** to view boot logs and IP assignment.
+
+---
+
+### 4. Smart Firmware Features & Networking
+
+The v2.0 firmware includes resilient networking and on-board management capabilities:
+
+- **Automatic Heartbeat Registration**: Upon Wi-Fi connection, the glasses ping the FastAPI backend (`/api/v1/glasses/heartbeat`), allowing the Flutter mobile app to immediately recognize the glasses' connection status.
+- **Embedded Web Control Hub (Port 80)**:
+  - Access `http://<glasses-ip>/` (e.g. `http://192.168.10.26/`) in any browser on your phone or PC.
+  - View live previews of captured slides without needing backend services.
+  - Direct full-res image URL: `http://<glasses-ip>/latest.jpg`.
+- **Runtime IP Reconfiguration (Zero Re-flashing)**:
+  - If your backend computer IP changes (e.g., `192.168.10.25`), open `http://<glasses-ip>/` in your phone browser, enter the new backend IP, and tap **Save**. It is permanently stored in ESP32 non-volatile flash (NVS).
+- **Fallback Hotspot (AP Mode)**:
+  - If the configured Wi-Fi is unavailable (e.g. in lecture halls or outdoors), the glasses launch a standalone Wi-Fi hotspot named `AI-Vision-Glasses` (Password: `12345678`) at `192.168.4.1`.
+- **mDNS Support**:
+  - Reachable via `http://ai-glasses.local/` on supported local network devices.
+
+---
+
+### 5. Live Operation & Multi-Modal Sync Flow
+
+```text
+   [User Clicks Button on Glasses]
+                 │
+                 ▼
+   [ESP32 captures UXGA frame to PSRAM]
+                 │
+                 ▼ (HTTP POST binary JPEG)
+   [FastAPI Backend: /api/v1/glasses/capture]
+                 │
+       ┌─────────┴─────────┐
+       ▼                   ▼
+   [YOLOv8 Face Blur]   [EasyOCR Extraction]
+       │                   │
+       └─────────┬─────────┘
+                 │
+                 ▼ (WebSocket Broadcast: glasses_snapshot)
+   [Flutter App: Multi-Input Notes Studio]
+   - Shows real-time slide inline with audio transcript
+   - Synchronized to exact lecture timeline second
+```
 
 ---
 
@@ -291,6 +405,14 @@ dart analyze lib
 flutter test
 ```
 *Expected Output*: `Analyzing lib... No issues found!` and `All tests passed!`.
+
+---
+
+### Test 5: ESP32-CAM Smart Glasses Hardware Verification
+1. **Live Camera Hub**: Open `http://<glasses-ip>/` in your phone or PC browser (or `http://ai-glasses.local/`). Verify the camera status is `ready` and click "📸 Capture Slide Now".
+2. **Physical Button Trigger**: Press the push button on GPIO 14. Observe the flash/status LED blink on the glasses, indicating capture and successful upload.
+3. **Backend Monitor**: Navigate to `http://localhost:8000/api/v1/glasses/capture` in your browser to view the latest blurred frame and extracted EasyOCR formulas.
+4. **Flutter Studio Sync**: In the Flutter app, open **Multi-Input Notes Studio**. The hardware status chip will indicate **"AI Vision Glasses (ESP32-CAM) Connected"** and display the captured slide inline on the timeline.
 
 ---
 

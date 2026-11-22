@@ -72,6 +72,11 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
   // lecture name typed when the recording was stopped (also the noise-scoring topic)
   String? sessionName;
 
+  bool isGlassesConnected = false;
+  String glassesConnectionMode = '';
+  bool isCheckingGlasses = false;
+  Timer? _glassesCheckTimer;
+
   @override
   void initState() {
     super.initState();
@@ -84,6 +89,33 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     }
 
     _initLiveTranscriptListener();
+    _checkGlassesStatus();
+    _glassesCheckTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (mounted) _checkGlassesStatus();
+    });
+  }
+
+  Future<void> _checkGlassesStatus() async {
+    if (isCheckingGlasses) return;
+    setState(() => isCheckingGlasses = true);
+    try {
+      final res = await AudioService().checkGlassesStatus();
+      if (mounted) {
+        setState(() {
+          isGlassesConnected = res['connected'] == true;
+          glassesConnectionMode = (res['connection_mode'] ?? '').toString();
+          isCheckingGlasses = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          isGlassesConnected = false;
+          glassesConnectionMode = '';
+          isCheckingGlasses = false;
+        });
+      }
+    }
   }
 
   void _loadResumedSession(SavedInput s) {
@@ -205,6 +237,10 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
         );
 
         setState(() {
+          if (isGlasses) {
+            isGlassesConnected = true;
+            glassesConnectionMode = 'Live Capture';
+          }
           sessionCapturedImages.add(newItem);
         });
 
@@ -229,6 +265,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
   @override
   void dispose() {
+    _glassesCheckTimer?.cancel();
     _liveTranscriptSub?.cancel();
     timer?.cancel();
     super.dispose();
@@ -407,6 +444,17 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       );
 
       if (!mounted) return;
+
+      final finalTitle = typedName ?? _defaultSessionName();
+      // Auto-save session materials to Saved Inputs so they are never lost even if the user exits without tapping Save
+      DemoData.addSessionInput(
+        sessionId: currentSessionId,
+        title: finalTitle,
+        audioTranscripts: activeTranscripts,
+        capturedImages: sessionCapturedImages,
+        audioDuration: timeText,
+        allTranscriptLines: allTranscriptLineItems,
+      );
 
       setState(() {
         sessionName = typedName;
@@ -1293,6 +1341,24 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     );
   }
 
+  void _autoSaveIfUnsaved() {
+    if (sessionTranscriptEntries.isEmpty && sessionCapturedImages.isEmpty) return;
+    final sid = currentSessionId;
+    if (sid == null) return;
+    final alreadySaved = DemoData.savedInputs.any((s) => s.sessionId == sid);
+    if (!alreadySaved) {
+      final finalTitle = sessionName ?? _defaultSessionName();
+      DemoData.addSessionInput(
+        sessionId: sid,
+        title: finalTitle,
+        audioTranscripts: activeTranscripts,
+        capturedImages: sessionCapturedImages,
+        audioDuration: timeText,
+        allTranscriptLines: allTranscriptLineItems,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1300,7 +1366,13 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     final entries = displayedTranscriptEntries;
     final hasFlaggedLines = entries.any((e) => e.isFlagged);
 
-    return Scaffold(
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) return;
+        _autoSaveIfUnsaved();
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('Multi-Input Notes Studio'),
         actions: [
@@ -1727,42 +1799,67 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
-                      color: AppTheme.accentTeal.withValues(alpha: 0.08),
+                      color: (isGlassesConnected ? AppTheme.accentTeal : Colors.amber)
+                          .withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: AppTheme.accentTeal.withValues(alpha: 0.35),
+                        color: (isGlassesConnected ? AppTheme.accentTeal : Colors.amber)
+                            .withValues(alpha: 0.35),
                       ),
                     ),
                     child: Row(
                       children: [
-                        const Icon(
-                          Icons.visibility_outlined,
-                          color: AppTheme.accentTeal,
+                        Icon(
+                          isGlassesConnected
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          color: isGlassesConnected
+                              ? AppTheme.accentTeal
+                              : Colors.amber.shade800,
                           size: 22,
                         ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
-                            children: const [
+                            children: [
                               Text(
-                                'AI Vision Glasses (ESP32-CAM) Connected',
+                                isGlassesConnected
+                                    ? (glassesConnectionMode.isNotEmpty
+                                        ? 'AI Vision Glasses (ESP32-CAM) Connected • $glassesConnectionMode'
+                                        : 'AI Vision Glasses (ESP32-CAM) Connected')
+                                    : 'AI Vision Glasses (ESP32-CAM) Not Connected',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold,
-                                  color: AppTheme.accentTeal,
+                                  color: isGlassesConnected
+                                      ? AppTheme.accentTeal
+                                      : Colors.amber.shade900,
                                 ),
                               ),
-                              SizedBox(height: 2),
+                              const SizedBox(height: 2),
                               Text(
-                                'Press the push button on your glasses to capture slides in real-time.',
-                                style: TextStyle(
+                                isGlassesConnected
+                                    ? 'Hardware ready. Press the push button on your glasses to capture slides in real-time.'
+                                    : 'Plug in via USB cable or connect ESP32-CAM to Wi-Fi. You can also use the mobile camera below.',
+                                style: const TextStyle(
                                   fontSize: 11,
                                   color: AppTheme.mutedText,
                                 ),
                               ),
                             ],
                           ),
+                        ),
+                        IconButton(
+                          tooltip: 'Check Glasses Connection',
+                          icon: isCheckingGlasses
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.refresh, size: 18),
+                          onPressed: isCheckingGlasses ? null : _checkGlassesStatus,
                         ),
                       ],
                     ),
@@ -1845,6 +1942,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           const SizedBox(height: 20),
         ],
       ),
+    ),
     );
   }
 }

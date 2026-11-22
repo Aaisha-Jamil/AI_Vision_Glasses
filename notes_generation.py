@@ -678,10 +678,10 @@ def _synthesize_academic_markdown(timeline: list, session_meta: dict) -> tuple[s
 # as 3.x preview models so requests succeed even during Google server demand spikes.
 GEMINI_MODELS = [m.strip() for m in os.getenv(
     "GEMINI_MODELS",
-    "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash,gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash"
+    "gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash"
 ).split(",") if m.strip()]
 # Per-model limit. Without it the legacy SDK silently retries a 503 for ~10 minutes.
-GEMINI_TIMEOUT_S = float(os.getenv("GEMINI_TIMEOUT_S", "120"))
+GEMINI_TIMEOUT_S = float(os.getenv("GEMINI_TIMEOUT_S", "60"))
 
 
 def _call_gemini(parts: list, session_meta: dict = None, timeline: list = None) -> tuple[str, dict]:

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../data/demo_data.dart';
+import '../services/api_config.dart';
+import '../services/audio_service.dart';
 import '../services/auth_service.dart';
 import '../widgets/ui_helpers.dart';
 import 'audio_studio_screen.dart';
@@ -24,6 +26,9 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  bool _isCheckingHardware = true;
+  bool _isHardwareConnected = false;
+
   @override
   void initState() {
     super.initState();
@@ -31,6 +36,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
     DemoData.loadFromSupabase().then((_) {
       if (mounted) setState(() {});
     });
+    _checkHardwareConnection();
+  }
+
+  Future<void> _checkHardwareConnection() async {
+    try {
+      final res = await AudioService().checkHealth();
+      if (mounted) {
+        setState(() {
+          _isHardwareConnected = res['online'] == true;
+          _isCheckingHardware = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isHardwareConnected = false;
+          _isCheckingHardware = false;
+        });
+      }
+    }
   }
 
   Future<void> logout(BuildContext context) async {
@@ -190,36 +215,68 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Devices Connection',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Icon(Icons.bluetooth, color: Theme.of(context).colorScheme.primary),
-                      const SizedBox(width: 10),
-                      const Expanded(child: Text('Bluetooth: Hardware status')),
-                      const Chip(label: Text('Ready')),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Icon(Icons.battery_5_bar, color: Theme.of(context).colorScheme.primary),
-                      const SizedBox(width: 10),
-                      const Expanded(child: Text('Battery: Smart Glasses')),
-                      const Text('85%'),
+                      const Text(
+                        'Hardware Status',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Check Status',
+                        icon: const Icon(Icons.refresh, size: 20),
+                        onPressed: () {
+                          setState(() => _isCheckingHardware = true);
+                          _checkHardwareConnection();
+                        },
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                    'Hardware connection and battery information '
-                    'are not implemented in this demo.',
-                    style: TextStyle(fontSize: 12),
+                  Row(
+                    children: [
+                      Icon(
+                        _isHardwareConnected
+                            ? Icons.check_circle_outline
+                            : Icons.highlight_off,
+                        color: _isHardwareConnected
+                            ? Colors.green
+                            : Theme.of(context).colorScheme.error,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _isCheckingHardware
+                              ? 'Checking hardware status...'
+                              : (_isHardwareConnected
+                                  ? 'Connected (${ApiConfig().baseUrl})'
+                                  : 'Disconnected (Cannot reach backend)'),
+                          style: TextStyle(
+                            fontWeight: FontWeight.w500,
+                            color: _isHardwareConnected
+                                ? Colors.green
+                                : Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ),
+                      Chip(
+                        label: Text(
+                          _isCheckingHardware
+                              ? 'Checking'
+                              : (_isHardwareConnected ? 'Connected' : 'Offline'),
+                        ),
+                        backgroundColor: _isHardwareConnected
+                            ? Colors.green.withValues(alpha: 0.15)
+                            : Colors.red.withValues(alpha: 0.15),
+                        labelStyle: TextStyle(
+                          color: _isHardwareConnected ? Colors.green : Colors.red,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

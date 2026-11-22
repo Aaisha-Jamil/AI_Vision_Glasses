@@ -85,6 +85,25 @@ class AudioService {
   }
 
   // ---------------------------------------------------------
+  // SMART GLASSES (ESP32-CAM) STATUS
+  // ---------------------------------------------------------
+
+  Future<Map<String, dynamic>> checkGlassesStatus() async {
+    try {
+      final resp = await http
+          .get(_config.endpoint('/api/v1/glasses/status'))
+          .timeout(const Duration(seconds: 3));
+
+      if (resp.statusCode == 200) {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      }
+      return {'connected': false};
+    } catch (_) {
+      return {'connected': false};
+    }
+  }
+
+  // ---------------------------------------------------------
   // START SESSION
   // ---------------------------------------------------------
 

@@ -412,6 +412,17 @@ void setupWiFi() {
     Serial.printf("  Target Backend:     http://%s:%d%s\n", currentServerHost.c_str(), currentServerPort, currentUploadPath.c_str());
     Serial.println("==================================================");
     blinkLed(3, 80);
+
+    // Announce IP heartbeat to backend so Flutter app immediately recognizes glasses connection
+    if (currentServerHost.length() > 0) {
+      HTTPClient httpHeartbeat;
+      String heartbeatUrl = "http://" + currentServerHost + ":" + String(currentServerPort) + "/api/v1/glasses/heartbeat?ip=" + WiFi.localIP().toString();
+      httpHeartbeat.begin(heartbeatUrl);
+      httpHeartbeat.setTimeout(3000);
+      int code = httpHeartbeat.GET();
+      Serial.printf("  [Heartbeat] Registered with backend (code: %d)\n", code);
+      httpHeartbeat.end();
+    }
   } else {
     // Wi-Fi connection failed -> Start Access Point Hotspot Mode!
     Serial.println("\n[WiFi] Could not connect to router.");
