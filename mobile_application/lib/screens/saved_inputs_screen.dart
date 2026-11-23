@@ -3,6 +3,7 @@ import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/notes_job_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
@@ -33,28 +34,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
   
   Future<void> generateNotes(SavedInput input) async {
-    final note = await DemoData.generateAiNotesForInput(input);
-
-    // Screen dispose ho chuki ho to aage UI update na karein.
-    if (!mounted) return;
-
-    setState(() {});
-
-    if (note == null) {
-      showMessage(context, 'Notes were already generated for this input.');
-      return;
-    }
-
-    // Scenario 1: Document Has Been Generated
-    // Prompt Keep or Discard.
-    await showPostNoteGenerationRetentionDialog(
-      context: context,
-      session: input,
-      note: note,
-      onDone: () {
-        if (mounted) setState(() {});
-      },
-    );
+    // runs in the background (progress strip at the top); the Keep / Discard
+    // inputs dialog opens from the "Notes ready" snackbar
+    NotesJobs.instance.start(input, onChanged: () {
+      if (mounted) setState(() {});
+    });
   }
 
 
@@ -231,6 +215,34 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     showMessage(context, 'Transcript line deleted from Supabase.');
   }
 
+  Future<void> deleteImageItem(
+      CapturedImageItem img, [SavedInput? input]) async {
+    final confirmed = await askConfirmation(
+      context,
+      title: 'Remove Image?',
+      message: 'Remove "${img.title}" from this saved session?',
+      confirmText: 'Remove',
+    );
+    if (!mounted || !confirmed) return;
+    setState(() {
+      if (input != null) {
+        input.capturedImages.removeWhere((i) =>
+            (img.snapshotId != null && i.snapshotId == img.snapshotId) ||
+            i.id == img.id);
+      } else {
+        for (final s in DemoData.savedInputs) {
+          s.capturedImages.removeWhere((i) =>
+              (img.snapshotId != null && i.snapshotId == img.snapshotId) ||
+              i.id == img.id);
+        }
+      }
+    });
+    await DemoData.deleteImageSnapshot(img);
+    if (mounted) {
+      showMessage(context, 'Image removed from session.');
+    }
+  }
+
   // ── Widget builders ───────────────────────────────────────────────────────
 
   Widget _buildTranscriptSection(
@@ -258,7 +270,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
           ),
           const SizedBox(height: 8),
           ...input.capturedImages
-              .map((img) => _buildInlineCapturedImage(img, isDark, theme)),
+              .map((img) => _buildInlineCapturedImage(img, isDark, theme, input)),
         ],
       );
     }
@@ -297,7 +309,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
     final preLineImgs = imagesByLineIndex[-1];
     if (preLineImgs != null) {
       for (final img in preLineImgs) {
-        items.add(_buildInlineCapturedImage(img, isDark, theme));
+        items.add(_buildInlineCapturedImage(img, isDark, theme, input));
       }
     }
 
@@ -312,14 +324,14 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
       final imgsHere = imagesByLineIndex[i];
       if (imgsHere != null) {
         for (final img in imgsHere) {
-          items.add(_buildInlineCapturedImage(img, isDark, theme));
+          items.add(_buildInlineCapturedImage(img, isDark, theme, input));
         }
       }
     }
 
     // Append legacy images (no capturedAtSecond) at the end
     for (final img in legacyImages) {
-      items.add(_buildInlineCapturedImage(img, isDark, theme));
+      items.add(_buildInlineCapturedImage(img, isDark, theme, input));
     }
 
     return Column(
@@ -373,7 +385,8 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
 
   /// Inline image card displayed within the transcript stream.
   Widget _buildInlineCapturedImage(
-      CapturedImageItem img, bool isDark, ThemeData theme) {
+      CapturedImageItem img, bool isDark, ThemeData theme,
+      [SavedInput? parentInput]) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
@@ -452,6 +465,19 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                     ),
                   ),
                 ],
+                const SizedBox(width: 8),
+                InkWell(
+                  borderRadius: BorderRadius.circular(4),
+                  onTap: () => deleteImageItem(img, parentInput),
+                  child: Padding(
+                    padding: const EdgeInsets.all(3.0),
+                    child: Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: AppTheme.danger,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -540,7 +566,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
               if (input.capturedImages.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 ...input.capturedImages.map((img) => _buildInlineCapturedImage(
-                    img, theme.brightness == Brightness.dark, theme)),
+                    img, theme.brightness == Brightness.dark, theme, input)),
               ],
             ],
           ),
@@ -822,7 +848,7 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                       const SizedBox(height: 2),
                       Text(
                         DemoData.canAddUnfinishedSession
-                            ? 'Limited Supabase storage: up to 2 unfinished sessions can be saved to continue later.'
+                            ? 'Limited Supabase storage: up to ${DemoData.maxUnfinishedSessions} unfinished sessions can be saved to continue later.'
                             : 'Storage limit reached! Generate notes or delete an unfinished session to free a slot.',
                         style: TextStyle(
                           fontSize: 11,
@@ -1052,9 +1078,11 @@ class _SavedInputsScreenState extends State<SavedInputsScreen> {
                         ...input.capturedImages.map((img) => Padding(
                               padding:
                                   const EdgeInsets.only(bottom: 10),
-                              child: BoardPreviewWidget(
-                                item: img,
-                                compact: true,
+                              child: _buildInlineCapturedImage(
+                                img,
+                                isDark,
+                                theme,
+                                input,
                               ),
                             )),
                       ] else ...[

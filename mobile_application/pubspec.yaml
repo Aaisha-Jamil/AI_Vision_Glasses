@@ -19,6 +19,9 @@ dependencies:
   permission_handler: ^11.3.1
   record: ^5.2.1
   flutter_secure_storage: ^9.2.4
+  crop_your_image: ^2.0.1
+  flutter_markdown_plus: ^1.0.12
+  url_launcher: ^6.3.3
 
 dev_dependencies:
   flutter_test:
@@ -30,3 +33,6 @@ flutter:
 
 dependency_overrides:
   record_web: 1.3.0
+  # record 5.2.1 pulls record_linux 0.7.2, which does not compile against
+  # record_platform_interface 1.6.0 (breaks Android release builds).
+  record_linux: 1.3.1

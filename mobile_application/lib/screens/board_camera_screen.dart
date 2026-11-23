@@ -120,6 +120,10 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
           confidenceScore: conf,
           peopleDetected: peopleDetected,
         );
+        // OCR runs in the background on the server: fetch the text when ready
+        if (ocrText == CapturedImageItem.ocrPendingText) {
+          VisionService().watchOcr(snapshotId);
+        }
         hasPreview = true;
         looksGoodClicked = false;
         isProcessing = false;
@@ -173,7 +177,7 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
       return;
     }
 
-    // Scenario 2: Enforce 2 unfinished sessions limit per user
+    // Scenario 2: Enforce unfinished sessions limit per user
     if (!DemoData.canAddUnfinishedSession) {
       await showDialog(
         context: context,
@@ -185,9 +189,9 @@ class _BoardCameraScreenState extends State<BoardCameraScreen> {
               Text('Storage Limit Reached'),
             ],
           ),
-          content: const Text(
-            'You already have 2 unfinished sessions saved. Due to Supabase database storage limitations, '
-            'a maximum of 2 unfinished sessions can be saved per user.\n\n'
+          content: Text(
+            'You already have ${DemoData.maxUnfinishedSessions} unfinished sessions saved. Due to Supabase database storage limitations, '
+            'a maximum of ${DemoData.maxUnfinishedSessions} unfinished sessions can be saved per user.\n\n'
             'Please generate notes for an existing session or delete an unfinished session before saving a new one.',
           ),
           actions: [

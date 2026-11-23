@@ -3,6 +3,7 @@ import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/notes_job_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'saved_notes_screen.dart';
@@ -159,28 +160,11 @@ class _SavedStudioSessionScreenState extends State<SavedStudioSessionScreen> {
 
   
   Future<void> generateNotes() async {
-    final note = await DemoData.generateAiNotesForInput(input);
-
-    // Check karein ke screen abhi active hai.
-    if (!mounted) return;
-
-    setState(() {});
-
-    if (note == null) {
-      showMessage(context, 'Notes were already generated for this input.');
-      return;
-    }
-
-    // Scenario 1: Document Has Been Generated
-    // Prompt Keep or Discard.
-    await showPostNoteGenerationRetentionDialog(
-      context: context,
-      session: input,
-      note: note,
-      onDone: () {
-        if (mounted) setState(() {});
-      },
-    );
+    // runs in the background (progress strip at the top); the Keep / Discard
+    // inputs dialog opens from the "Notes ready" snackbar
+    NotesJobs.instance.start(input, onChanged: () {
+      if (mounted) setState(() {});
+    });
   }
 
 

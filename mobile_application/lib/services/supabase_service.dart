@@ -4,6 +4,7 @@ import '../models/board_image_item.dart';
 import '../models/note.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import 'auth_session_store.dart';
 
 class SupabaseService {
   static final SupabaseService _instance = SupabaseService._internal();
@@ -13,12 +14,19 @@ class SupabaseService {
   String supabaseUrl = 'https://njojrbptyjgwlmwjhchx.supabase.co';
   String supabaseKey = 'sb_publishable_jz5MuoMdwBty3fP9eto5Gw_81QWD0wY';
 
-  Map<String, String> get _headers => {
-        'apikey': supabaseKey,
-        'Authorization': 'Bearer $supabaseKey',
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation',
-      };
+  /// apikey = the public key (identifies the project); Authorization = the signed-in
+  /// user's access token, so Supabase RLS can limit every query to that user's rows.
+  /// Falls back to the public key only when nobody is signed in.
+  Future<Map<String, String>> get _headers async {
+    final token = await AuthSessionStore.readAccessToken();
+    final bearer = (token != null && token.isNotEmpty) ? token : supabaseKey;
+    return {
+      'apikey': supabaseKey,
+      'Authorization': 'Bearer $bearer',
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation',
+    };
+  }
 
   // ===========================================================================
   // SESSIONS (FETCH, INSERT, UPDATE, DELETE)
@@ -32,12 +40,12 @@ class SupabaseService {
   Future<List<SavedInput>> fetchUserSessions(String userId) async {
     try {
       final userFilter = userId.trim().isNotEmpty
-          ? 'or=(user_id.eq.$userId,user_id.is.null)&'
+          ? 'user_id=eq.${Uri.encodeQueryComponent(userId)}&'
           : '';
       final uri = Uri.parse(
         '$supabaseUrl/rest/v1/sessions?${userFilter}order=start_time.desc',
       );
-      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.get(uri, headers: await _headers).timeout(const Duration(seconds: 10));
 
       if (response.statusCode != 200) {
         return [];
@@ -68,15 +76,33 @@ class SupabaseService {
         final createdAt = rawCreated != null ? DateTime.tryParse(rawCreated) : null;
         final baseEpoch = createdAt != null ? (createdAt.millisecondsSinceEpoch / 1000.0) : null;
 
-        // Fetch associated chunks and snapshots together
-        final lines = await _fetchSessionChunks(sessionId, baseEpoch: baseEpoch);
-        final images = await _fetchSessionImages(sessionId, baseEpoch: baseEpoch);
+        // Fetch associated chunks and snapshots together in parallel
+        final results = await Future.wait([
+          _fetchSessionChunks(sessionId, baseEpoch: baseEpoch),
+          _fetchSessionImages(sessionId, baseEpoch: baseEpoch),
+        ]);
+        final lines = results[0] as List<TranscriptLineItem>;
+        final images = results[1] as List<CapturedImageItem>;
 
         // If notes have been generated and raw inputs were discarded (no chunks and no images),
         // then this session has no inputs to show in Saved Inputs (its document is in Saved Notes).
         if (isNotesGenerated && lines.isEmpty && images.isEmpty && (row['raw_content'] == null || (row['raw_content'] as String).isEmpty)) {
           continue;
         }
+
+        // Calculate audio duration from chunks if not explicitly stored
+        String? audioDuration = row['audio_duration'] as String?;
+        if ((audioDuration == null || audioDuration.isEmpty) && lines.isNotEmpty) {
+          final maxSec = lines.map((l) => l.secondTrigger).fold<int>(0, (prev, s) => s > prev ? s : prev);
+          final mins = (maxSec ~/ 60).toString().padLeft(2, '0');
+          final secs = (maxSec % 60).toString().padLeft(2, '0');
+          audioDuration = '$mins:$secs';
+        }
+
+        final rawContent = row['raw_content'] as String?;
+        final content = (rawContent != null && rawContent.trim().isNotEmpty)
+            ? rawContent
+            : lines.map((l) => l.formatted).join('\n');
 
         rawList.add(
           SavedInput(
@@ -85,9 +111,9 @@ class SupabaseService {
             userId: row['user_id'] as String? ?? userId,
             title: row['title'] as String? ?? 'Untitled Session',
             type: row['input_type'] as String? ?? 'Workshop Session',
-            content: row['raw_content'] as String? ?? '',
+            content: content,
             notesGenerated: isNotesGenerated,
-            audioDuration: row['audio_duration'] as String?,
+            audioDuration: audioDuration,
             expiresAt: expiresAt,
             createdAt: createdAt,
             transcriptLines: lines,
@@ -150,7 +176,7 @@ class SupabaseService {
       final uri = Uri.parse(
         '$supabaseUrl/rest/v1/audio_chunks?session_id=eq.$sessionId&order=start_timestamp.asc',
       );
-      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 8));
+      final response = await http.get(uri, headers: await _headers).timeout(const Duration(seconds: 8));
       if (response.statusCode != 200) return [];
 
       final List<dynamic> chunks = jsonDecode(response.body);
@@ -187,11 +213,33 @@ class SupabaseService {
       final uri = Uri.parse(
         '$supabaseUrl/rest/v1/image_snapshots?session_id=eq.$sessionId&order=timestamp.asc',
       );
-      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 8));
+      final response = await http.get(uri, headers: await _headers).timeout(const Duration(seconds: 8));
       if (response.statusCode != 200) return [];
 
       final List<dynamic> snapshots = jsonDecode(response.body);
       final List<CapturedImageItem> items = [];
+
+      // Fetch all OCR extractions for these snapshots in a single batch query:
+      final Map<String, String> ocrMap = {};
+      final Map<String, double?> confMap = {};
+      final snapIds = snapshots.map((s) => s['snapshot_id'] as String?).whereType<String>().toList();
+      if (snapIds.isNotEmpty) {
+        try {
+          final idsParam = snapIds.map(Uri.encodeQueryComponent).join(',');
+          final ocrUri = Uri.parse('$supabaseUrl/rest/v1/ocr_extractions?snapshot_id=in.($idsParam)');
+          final ocrResp = await http.get(ocrUri, headers: await _headers).timeout(const Duration(seconds: 8));
+          if (ocrResp.statusCode == 200) {
+            final List<dynamic> ocrData = jsonDecode(ocrResp.body);
+            for (final row in ocrData) {
+              final snapId = row['snapshot_id'] as String?;
+              if (snapId != null) {
+                ocrMap[snapId] = row['extracted_text'] as String? ?? '';
+                confMap[snapId] = (row['confidence_score'] as num?)?.toDouble();
+              }
+            }
+          }
+        } catch (_) {}
+      }
 
       for (int i = 0; i < snapshots.length; i++) {
         final s = snapshots[i];
@@ -205,22 +253,8 @@ class SupabaseService {
                 ? BoardImageOption.ocr
                 : BoardImageOption.both;
 
-        // Fetch OCR text if available
-        String ocrText = '';
-        double? confidence;
-        try {
-          final ocrUri = Uri.parse(
-            '$supabaseUrl/rest/v1/ocr_extractions?snapshot_id=eq.$snapId&limit=1',
-          );
-          final ocrResp = await http.get(ocrUri, headers: _headers).timeout(const Duration(seconds: 5));
-          if (ocrResp.statusCode == 200) {
-            final List<dynamic> ocrData = jsonDecode(ocrResp.body);
-            if (ocrData.isNotEmpty) {
-              ocrText = ocrData[0]['extracted_text'] as String? ?? '';
-              confidence = (ocrData[0]['confidence_score'] as num?)?.toDouble();
-            }
-          }
-        } catch (_) {}
+        final ocrText = ocrMap[snapId] ?? '';
+        final confidence = confMap[snapId];
 
         final filepath = s['blurred_filepath'] as String? ?? '';
         items.add(
@@ -264,7 +298,7 @@ class SupabaseService {
 
       final response = await http.post(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 12));
 
@@ -306,7 +340,7 @@ class SupabaseService {
 
       await http.post(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(chunksPayload),
       );
     } catch (_) {}
@@ -333,7 +367,7 @@ class SupabaseService {
                   ? 'OCR_TEXT_ONLY'
                   : 'BOTH',
         };
-        await http.post(uri, headers: _headers, body: jsonEncode(payload));
+        await http.post(uri, headers: await _headers, body: jsonEncode(payload));
 
         // Also persist OCR extraction if present
         if (img.ocrText.isNotEmpty) {
@@ -345,7 +379,7 @@ class SupabaseService {
             'extracted_text': img.ocrText,
             'confidence_score': img.confidenceScore ?? 0.95,
           };
-          await http.post(ocrUri, headers: _headers, body: jsonEncode(ocrPayload));
+          await http.post(ocrUri, headers: await _headers, body: jsonEncode(ocrPayload));
         }
       }
     } catch (_) {}
@@ -369,7 +403,7 @@ class SupabaseService {
 
       final response = await http.patch(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
 
@@ -397,7 +431,7 @@ class SupabaseService {
 
       final response = await http.patch(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
 
@@ -411,7 +445,7 @@ class SupabaseService {
   Future<bool> deleteAudioChunk(String chunkId) async {
     try {
       final uri = Uri.parse('$supabaseUrl/rest/v1/audio_chunks?chunk_id=eq.$chunkId');
-      final response = await http.delete(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.delete(uri, headers: await _headers).timeout(const Duration(seconds: 10));
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (_) {
       return false;
@@ -432,7 +466,7 @@ class SupabaseService {
                 ? 'OCR_TEXT_ONLY'
                 : 'BOTH',
       };
-      final response = await http.patch(uri, headers: _headers, body: jsonEncode(payload));
+      final response = await http.patch(uri, headers: await _headers, body: jsonEncode(payload));
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (_) {
       return false;
@@ -443,7 +477,7 @@ class SupabaseService {
   Future<bool> deleteImageSnapshot(String snapshotId) async {
     try {
       final uri = Uri.parse('$supabaseUrl/rest/v1/image_snapshots?snapshot_id=eq.$snapshotId');
-      final response = await http.delete(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.delete(uri, headers: await _headers).timeout(const Duration(seconds: 10));
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (_) {
       return false;
@@ -456,7 +490,7 @@ class SupabaseService {
       final uri = Uri.parse('$supabaseUrl/storage/v1/object/$bucket');
       await http.delete(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode({'prefixes': prefixes}),
       ).timeout(const Duration(seconds: 8));
     } catch (_) {}
@@ -469,18 +503,18 @@ class SupabaseService {
     try {
       // 1. Delete all audio chunks for this session
       final chunksUri = Uri.parse('$supabaseUrl/rest/v1/audio_chunks?session_id=eq.$sessionId');
-      await http.delete(chunksUri, headers: _headers).timeout(const Duration(seconds: 8));
+      await http.delete(chunksUri, headers: await _headers).timeout(const Duration(seconds: 8));
 
       // 2. Delete all audio containers
       final contUri = Uri.parse('$supabaseUrl/rest/v1/audio_containers?session_id=eq.$sessionId');
-      await http.delete(contUri, headers: _headers).timeout(const Duration(seconds: 8));
+      await http.delete(contUri, headers: await _headers).timeout(const Duration(seconds: 8));
 
       // 3. Delete OCR extractions & image snapshots
       final ocrUri = Uri.parse('$supabaseUrl/rest/v1/ocr_extractions?session_id=eq.$sessionId');
-      await http.delete(ocrUri, headers: _headers).timeout(const Duration(seconds: 8));
+      await http.delete(ocrUri, headers: await _headers).timeout(const Duration(seconds: 8));
 
       final snapsUri = Uri.parse('$supabaseUrl/rest/v1/image_snapshots?session_id=eq.$sessionId');
-      await http.delete(snapsUri, headers: _headers).timeout(const Duration(seconds: 8));
+      await http.delete(snapsUri, headers: await _headers).timeout(const Duration(seconds: 8));
 
       // 4. Delete audio files from Supabase Storage
       await _deleteStorageObjects('lecture-audio', ['$sessionId/']);
@@ -494,7 +528,7 @@ class SupabaseService {
         'expires_at': null,
         'status': 'COMPLETED',
       };
-      await http.patch(sessUri, headers: _headers, body: jsonEncode(updatePayload)).timeout(const Duration(seconds: 8));
+      await http.patch(sessUri, headers: await _headers, body: jsonEncode(updatePayload)).timeout(const Duration(seconds: 8));
 
       return true;
     } catch (_) {
@@ -515,7 +549,7 @@ class SupabaseService {
       };
       final response = await http.patch(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 8));
 
@@ -534,7 +568,7 @@ class SupabaseService {
 
       // Delete the session row itself
       final uri = Uri.parse('$supabaseUrl/rest/v1/sessions?session_id=eq.$sessionId');
-      final response = await http.delete(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.delete(uri, headers: await _headers).timeout(const Duration(seconds: 10));
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (_) {
       return false;
@@ -545,12 +579,12 @@ class SupabaseService {
   Future<int> countUnfinishedSessions(String userId) async {
     try {
       final userFilter = userId.trim().isNotEmpty
-          ? 'or=(user_id.eq.$userId,user_id.is.null)&'
+          ? 'user_id=eq.${Uri.encodeQueryComponent(userId)}&'
           : '';
       final uri = Uri.parse(
         '$supabaseUrl/rest/v1/sessions?${userFilter}notes_generated=eq.false&select=session_id',
       );
-      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 6));
+      final response = await http.get(uri, headers: await _headers).timeout(const Duration(seconds: 6));
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(response.body);
         return data.length;
@@ -566,31 +600,48 @@ class SupabaseService {
   // ===========================================================================
 
   /// Fetches all generated notes for a user from Supabase.
+  /// Automatically deduplicates multiple note records for the same session (e.g. legacy duplicates).
   Future<List<DemoNote>> fetchUserNotes(String userId) async {
     try {
       final userFilter = userId.trim().isNotEmpty
-          ? 'or=(user_id.eq.$userId,user_id.is.null)&'
+          ? 'user_id=eq.${Uri.encodeQueryComponent(userId)}&'
           : '';
       final uri = Uri.parse('$supabaseUrl/rest/v1/generated_notes?${userFilter}order=created_at.desc');
-      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.get(uri, headers: await _headers).timeout(const Duration(seconds: 10));
 
       if (response.statusCode != 200) return [];
 
       final List<dynamic> data = jsonDecode(response.body);
       final List<DemoNote> notes = [];
+      final Set<String> seenSessions = {};
 
       for (int i = 0; i < data.length; i++) {
         final row = data[i];
+        final sessionId = row['session_id'] as String?;
+
+        // If multiple note records exist for the exact same session, keep only the first (newest) one
+        if (sessionId != null && sessionId.isNotEmpty) {
+          if (seenSessions.contains(sessionId)) {
+            continue;
+          }
+          seenSessions.add(sessionId);
+        }
+
         final rawCreated = row['created_at'] as String?;
         final createdAt = rawCreated != null ? DateTime.tryParse(rawCreated) : null;
+        final rawTitle = row['title'] as String? ?? 'Untitled Note';
+        // Normalize any legacy "- Comprehensive Notes" title suffix so notes display cleanly
+        final cleanTitle = rawTitle.endsWith(' - Comprehensive Notes')
+            ? rawTitle.substring(0, rawTitle.length - ' - Comprehensive Notes'.length)
+            : rawTitle;
 
         notes.add(
           DemoNote(
-            id: i + 1,
+            id: notes.length + 1,
             noteId: row['note_id'] as String?,
-            sessionId: row['session_id'] as String?,
+            sessionId: sessionId,
             userId: row['user_id'] as String?,
-            title: row['title'] as String? ?? 'Untitled Note',
+            title: cleanTitle,
             content: row['markdown_content'] as String? ?? '',
             type: 'Workshop Session Notes',
             isSatisfactory: row['is_satisfactory'] as bool?,
@@ -633,7 +684,7 @@ class SupabaseService {
 
       final response = await http.post(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
 
@@ -657,7 +708,7 @@ class SupabaseService {
       };
       final response = await http.patch(
         uri,
-        headers: _headers,
+        headers: await _headers,
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
 
@@ -671,7 +722,7 @@ class SupabaseService {
   Future<bool> deleteGeneratedNote(String noteId) async {
     try {
       final uri = Uri.parse('$supabaseUrl/rest/v1/generated_notes?note_id=eq.$noteId');
-      final response = await http.delete(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      final response = await http.delete(uri, headers: await _headers).timeout(const Duration(seconds: 10));
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (_) {
       return false;

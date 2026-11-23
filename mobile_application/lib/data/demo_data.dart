@@ -5,6 +5,14 @@ import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
 import '../services/notes_service.dart';
 import '../services/supabase_service.dart';
+import '../services/vision_service.dart';
+
+class NotesGenerationException implements Exception {
+  NotesGenerationException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
 
 class DemoData {
   static final List<SavedInput> savedInputs = [];
@@ -17,8 +25,8 @@ class DemoData {
 
   static bool isSyncing = false;
 
-  /// Scenario 2: Maximum of 2 unfinished sessions can be saved per user.
-  static const int maxUnfinishedSessions = 2;
+  /// Scenario 2: Maximum of 5 unfinished sessions can be saved per user.
+  static const int maxUnfinishedSessions = 5;
 
   /// Number of active sessions stored that do not have generated notes yet.
   static int get unfinishedSessionCount =>
@@ -304,6 +312,19 @@ class DemoData {
     return await SupabaseService().deleteAudioChunk(line.id);
   }
 
+  /// Deletes an image snapshot locally and permanently from Supabase.
+  static Future<bool> deleteImageSnapshot(CapturedImageItem img) async {
+    for (final s in savedInputs) {
+      s.capturedImages.removeWhere(
+        (i) => (img.snapshotId != null && i.snapshotId == img.snapshotId) || i.id == img.id,
+      );
+    }
+    if (img.snapshotId != null && img.snapshotId!.isNotEmpty) {
+      return await SupabaseService().deleteImageSnapshot(img.snapshotId!);
+    }
+    return true;
+  }
+
   static DemoNote? generateNotesForInput(SavedInput input) {
     if (input.notesGenerated) return null;
 
@@ -358,7 +379,7 @@ class DemoData {
       buffer.writeln('• Prepare follow-up questions for next lecture.');
 
       newNote = addNote(
-        title: '${input.title} - Comprehensive Notes',
+        title: input.title,
         content: buffer.toString(),
         type: 'Workshop Session Notes',
         sessionId: input.sessionId,
@@ -378,11 +399,15 @@ class DemoData {
     return newNote;
   }
 
-  /// Asynchronously generates academic lecture notes for [input] by connecting to the
-  /// Python Notes Generation module via NotesService. Falls back seamlessly to
-  /// the synchronous synthesis engine if the backend is offline.
+  /// Generates academic lecture notes for [input] through the backend (Gemini).
+  /// Returns null if notes were already generated for it; throws
+  /// [NotesGenerationException] with the reason if generation fails.
   static Future<DemoNote?> generateAiNotesForInput(SavedInput input) async {
     if (input.notesGenerated) return null;
+
+    // OCR text that arrived after this copy was saved (the server also waits for
+    // still-running OCR and fills it in, so a placeholder never reaches the notes)
+    VisionService.applyKnownOcr(input.capturedImages);
 
     final sessionData = {
       'session_id': input.sessionId,
@@ -421,33 +446,38 @@ class DemoData {
           .toList(),
     };
 
-    try {
-      final res = await NotesService().generateNotes(
-        sessionId: input.sessionId,
-        userId: input.userId,
-        sessionData: sessionData,
+    final res = await NotesService().generateNotes(
+      sessionId: input.sessionId,
+      userId: input.userId,
+      sessionData: sessionData,
+    );
+
+    final markdown = res['markdown_content'];
+    if (res['status'] != 'success' || markdown is! String || markdown.trim().isEmpty) {
+      // No silent local fallback: template notes looked like real AI notes.
+      throw NotesGenerationException(
+        (res['message'] ?? 'Notes generation failed.').toString(),
       );
+    }
+    final docxUrl = (res['docx_url'] as String?) ?? (res['docx_path'] as String?);
+    final backendNoteId = res['note_id'] as String?;
+    final noteTitle = (res['title'] as String?)?.isNotEmpty == true
+        ? res['title'] as String
+        : input.title;
 
-      if (res['status'] == 'success' && res['markdown_content'] != null) {
-        final markdown = res['markdown_content'] as String;
-        final docxUrl = (res['docx_url'] as String?) ?? (res['docx_path'] as String?);
+    final newNote = addNote(
+      title: noteTitle,
+      content: markdown,
+      type: 'Workshop Session Notes',
+      sessionId: input.sessionId,
+      userId: input.userId,
+      docxUrl: docxUrl,
+      noteId: backendNoteId,
+      persistToSupabase: false, // The backend notes_generation engine already saved it to Supabase!
+    );
 
-        final newNote = addNote(
-          title: '${input.title} - Comprehensive Notes',
-          content: markdown,
-          type: 'Workshop Session Notes',
-          sessionId: input.sessionId,
-          userId: input.userId,
-          docxUrl: docxUrl,
-        );
-
-        input.notesGenerated = true;
-        return newNote;
-      }
-    } catch (_) {}
-
-    // Graceful offline fallback
-    return generateNotesForInput(input);
+    input.notesGenerated = true;
+    return newNote;
   }
 
   /// Scenario 1: Applies retention decision after document has been generated:
@@ -465,8 +495,8 @@ class DemoData {
     input.isSatisfactory = isSatisfactory;
     input.notesGenerated = true;
 
-    // 1. Ensure note is saved in Supabase generated_notes table
-    if (note != null) {
+    // 1. Ensure note is saved in Supabase generated_notes table if not already persisted
+    if (note != null && (note.noteId == null || note.noteId!.isEmpty)) {
       SupabaseService().saveGeneratedNote(
         sessionId: input.sessionId,
         userId: input.userId,
@@ -495,14 +525,37 @@ class DemoData {
     String? sessionId,
     String? userId,
     String? docxUrl,
+    String? noteId,
+    bool persistToSupabase = true,
   }) {
     final sid = sessionId ?? 'sess_direct_${DateTime.now().millisecondsSinceEpoch}';
     final uid = userId ?? currentUserId;
-    final noteId = 'note_${nextId}_${DateTime.now().millisecondsSinceEpoch}';
+    final resolvedNoteId = noteId ?? 'note_${nextId}_${DateTime.now().millisecondsSinceEpoch}';
+
+    // If a note for this session already exists in memory, update it in place instead of creating a duplicate!
+    final existingIdx = notes.indexWhere((n) => n.sessionId != null && n.sessionId == sid);
+    if (existingIdx != -1) {
+      final existing = notes[existingIdx];
+      existing.title = title;
+      existing.content = content;
+      existing.type = type;
+      if (docxUrl != null) existing.docxUrl = docxUrl;
+      if (noteId != null) existing.noteId = noteId;
+      refreshCount();
+      if (persistToSupabase) {
+        SupabaseService().saveGeneratedNote(
+          sessionId: sid,
+          userId: uid,
+          note: existing,
+          isSatisfactory: true,
+        );
+      }
+      return existing;
+    }
 
     final note = DemoNote(
       id: nextId++,
-      noteId: noteId,
+      noteId: resolvedNoteId,
       sessionId: sid,
       userId: uid,
       title: title,
@@ -513,13 +566,15 @@ class DemoData {
     notes.insert(0, note);
     refreshCount();
 
-    // Persist note to Supabase generated_notes
-    SupabaseService().saveGeneratedNote(
-      sessionId: sid,
-      userId: uid,
-      note: note,
-      isSatisfactory: true,
-    );
+    // Persist note to Supabase generated_notes if not already persisted
+    if (persistToSupabase) {
+      SupabaseService().saveGeneratedNote(
+        sessionId: sid,
+        userId: uid,
+        note: note,
+        isSatisfactory: true,
+      );
+    }
 
     return note;
   }

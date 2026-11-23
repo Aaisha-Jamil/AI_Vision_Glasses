@@ -119,7 +119,8 @@ _load_env()
 # ---------------------------------------------------------------------------
 def _get_supabase_config():
     url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
-    key = os.getenv("SUPABASE_KEY", "").strip()
+    # backend only: secret (service-role) key, not the public key RLS limits per user
+    key = (os.getenv("SUPABASE_SECRET_KEY", "") or os.getenv("SUPABASE_KEY", "")).strip()
     if "/rest" in url:
         url = url.split("/rest")[0]
     return url, key
@@ -673,94 +674,85 @@ def _synthesize_academic_markdown(timeline: list, session_meta: dict) -> tuple[s
     return content, usage
 
 
+# Tried in order. We include production Gemini flash models (2.5, 2.0, 1.5) as well
+# as 3.x preview models so requests succeed even during Google server demand spikes.
+GEMINI_MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_MODELS",
+    "gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash"
+).split(",") if m.strip()]
+# Per-model limit. Without it the legacy SDK silently retries a 503 for ~10 minutes.
+GEMINI_TIMEOUT_S = float(os.getenv("GEMINI_TIMEOUT_S", "60"))
+
+
 def _call_gemini(parts: list, session_meta: dict = None, timeline: list = None) -> tuple[str, dict]:
     """
     Calls Gemini Flash with the constructed multimodal prompt.
     Returns the raw Markdown string from the model and token usage.
-    Falls back gracefully to academic synthesis if Gemini API key is missing or call fails.
+    Each model in GEMINI_MODELS gets one attempt of up to GEMINI_TIMEOUT_S seconds.
+    If every model fails, raises RuntimeError (the caller returns status "error") instead
+    of handing back template notes as if Gemini had written them.
+    Only with no Gemini key / SDK configured does it use the offline academic synthesis.
     """
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if _GENAI_AVAILABLE and api_key and not any(placeholder in api_key for placeholder in ["your_", "<", "YOUR_"]):
+    if not (_GENAI_AVAILABLE and api_key and not any(p in api_key for p in ["your_", "<", "YOUR_"])):
+        print("[notes_generation] No Gemini key configured - using offline academic synthesis.")
+        return _synthesize_academic_markdown(timeline or [], session_meta or {})
+
+    errors = []
+    if genai_types is not None:
+        # google.genai SDK (timeout is in milliseconds)
+        client = genai.Client(api_key=api_key,
+                              http_options=genai_types.HttpOptions(timeout=int(GEMINI_TIMEOUT_S * 1000)))
+        config = genai_types.GenerateContentConfig(
+            system_instruction=_SYSTEM_INSTRUCTION, temperature=0.3, top_p=0.85, max_output_tokens=8192)
+
+        def _generate(model_name):
+            return client.models.generate_content(model=model_name, contents=parts, config=config)
+        sdk = "google.genai SDK"
+    else:
+        # legacy google.generativeai SDK
+        genai.configure(api_key=api_key)
+
+        def _generate(model_name):
+            model = genai.GenerativeModel(
+                model_name=model_name, system_instruction=_SYSTEM_INSTRUCTION,
+                generation_config={"temperature": 0.3, "top_p": 0.85, "max_output_tokens": 8192})
+            return model.generate_content(parts, request_options={"timeout": GEMINI_TIMEOUT_S, "retry": None})
+        sdk = "legacy SDK"
+
+    for model_name in GEMINI_MODELS:
+        t0 = time.time()
+        print(f"[notes_generation] Sending request to {model_name} ({sdk}, timeout {GEMINI_TIMEOUT_S:.0f}s)...")
         try:
-            # Try new google.genai SDK first (non-deprecated)
-            if genai_types is not None:
-                # google.genai >= 0.8 Client API
-                client = genai.Client(api_key=api_key)
-                target_model = "gemini-2.5-flash"
-
-                generate_config = genai_types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_INSTRUCTION,
-                    temperature=0.3,
-                    top_p=0.85,
-                    max_output_tokens=8192,
-                )
-
-                print(f"[notes_generation] Sending request to {target_model} (google.genai SDK)...")
-                try:
-                    response = client.models.generate_content(
-                        model=target_model,
-                        contents=parts,
-                        config=generate_config,
-                    )
-                except Exception:
-                    target_model = "gemini-1.5-flash"
-                    response = client.models.generate_content(
-                        model=target_model,
-                        contents=parts,
-                        config=generate_config,
-                    )
-                print("[notes_generation] Gemini response received.")
-
-                usage = {}
-                if hasattr(response, "usage_metadata") and response.usage_metadata:
-                    usage = {
-                        "prompt_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                        "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
-                        "total_tokens": getattr(response.usage_metadata, "total_token_count", 0),
-                    }
-                return response.text, usage
-            else:
-                # Legacy google.generativeai fallback
-                genai.configure(api_key=api_key)
-                target_model = "gemini-2.5-flash"
-                try:
-                    model = genai.GenerativeModel(
-                        model_name=target_model,
-                        system_instruction=_SYSTEM_INSTRUCTION,
-                        generation_config={
-                            "temperature": 0.3,
-                            "top_p": 0.85,
-                            "max_output_tokens": 8192,
-                        }
-                    )
-                except Exception:
-                    target_model = "gemini-1.5-flash"
-                    model = genai.GenerativeModel(
-                        model_name=target_model,
-                        system_instruction=_SYSTEM_INSTRUCTION,
-                        generation_config={
-                            "temperature": 0.3,
-                            "top_p": 0.85,
-                            "max_output_tokens": 8192,
-                        }
-                    )
-                print(f"[notes_generation] Sending request to {target_model} (legacy SDK)...")
-                response = model.generate_content(parts)
-                print("[notes_generation] Gemini response received.")
-
-                usage = {}
-                if hasattr(response, "usage_metadata") and response.usage_metadata:
-                    usage = {
-                        "prompt_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                        "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
-                        "total_tokens": getattr(response.usage_metadata, "total_token_count", 0),
-                    }
-                return response.text, usage
+            response = _generate(model_name)
+            text = response.text
         except Exception as e:
-            print(f"[notes_generation] Gemini API call warning ({e}). Using academic synthesis engine.")
+            msg = f"{model_name}: {type(e).__name__}: {str(e)[:200]}"
+            print(f"[notes_generation] Gemini failed after {time.time() - t0:.1f}s - {msg}")
+            errors.append(msg)
+            continue
+        if not text or not text.strip():
+            print(f"[notes_generation] {model_name} returned an empty response.")
+            errors.append(f"{model_name}: empty response")
+            continue
+        print(f"[notes_generation] Gemini response received from {model_name} in {time.time() - t0:.1f}s.")
+        usage = {"model": model_name}
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            usage.update({
+                "prompt_tokens": getattr(meta, "prompt_token_count", 0),
+                "output_tokens": getattr(meta, "candidates_token_count", 0),
+                "total_tokens": getattr(meta, "total_token_count", 0),
+            })
+        return text, usage
 
-    # Graceful academic synthesis fallback
-    return _synthesize_academic_markdown(timeline or [], session_meta or {})
+    print(f"[notes_generation] Warning: All Gemini cloud models failed or are experiencing high demand spikes.")
+    print(f"[notes_generation] Errors: {' | '.join(errors)}")
+    print("[notes_generation] Gracefully falling back to local academic synthesis engine to generate notes...")
+    text, usage = _synthesize_academic_markdown(timeline or [], session_meta or {})
+    usage["model"] = "offline_academic_synthesis"
+    usage["fallback_reason"] = "All Gemini models temporarily unavailable: " + " | ".join(errors)
+    return text, usage
 
 # ---------------------------------------------------------------------------
 # Stage D: Build styled Microsoft Word .docx

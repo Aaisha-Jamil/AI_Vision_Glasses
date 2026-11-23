@@ -1,13 +1,18 @@
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../data/demo_data.dart';
 import '../models/board_image_item.dart';
 import '../models/saved_input.dart';
 import '../models/transcript_line_item.dart';
+import '../services/api_config.dart';
 import '../services/audio_service.dart';
+import '../services/notes_job_service.dart';
+import '../services/vision_service.dart';
 import '../widgets/board_preview_widget.dart';
 import '../widgets/ui_helpers.dart';
 import 'board_camera_screen.dart';
@@ -64,6 +69,14 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
   String? currentSessionId;
 
+  // lecture name typed when the recording was stopped (also the noise-scoring topic)
+  String? sessionName;
+
+  bool isGlassesConnected = false;
+  String glassesConnectionMode = '';
+  bool isCheckingGlasses = false;
+  Timer? _glassesCheckTimer;
+
   @override
   void initState() {
     super.initState();
@@ -76,10 +89,38 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     }
 
     _initLiveTranscriptListener();
+    _checkGlassesStatus();
+    _glassesCheckTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (mounted) _checkGlassesStatus();
+    });
+  }
+
+  Future<void> _checkGlassesStatus() async {
+    if (isCheckingGlasses) return;
+    setState(() => isCheckingGlasses = true);
+    try {
+      final res = await AudioService().checkGlassesStatus();
+      if (mounted) {
+        setState(() {
+          isGlassesConnected = res['connected'] == true;
+          glassesConnectionMode = (res['connection_mode'] ?? '').toString();
+          isCheckingGlasses = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          isGlassesConnected = false;
+          glassesConnectionMode = '';
+          isCheckingGlasses = false;
+        });
+      }
+    }
   }
 
   void _loadResumedSession(SavedInput s) {
     currentSessionId = s.sessionId;
+    sessionName = s.title;
 
     if (s.audioDuration != null && s.audioDuration!.contains(':')) {
       final parts = s.audioDuration!.split(':');
@@ -155,12 +196,76 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
             );
           }
         });
+      } else if (type == 'glasses_snapshot' || type == 'snapshot_captured') {
+        // Real-time slide capture from ESP32-CAM (AI Vision Glasses) or backend camera
+        final snapId = (data['snapshot_id'] ?? '').toString();
+        if (snapId.isEmpty) return;
+
+        // Prevent adding duplicate entries if both events fire
+        final alreadyPresent =
+            sessionCapturedImages.any((img) => img.snapshotId == snapId);
+        if (alreadyPresent) return;
+
+        final rawUrl = (data['blurred_image_url'] ??
+                data['image_url'] ??
+                '/static/snapshots/$snapId.jpg')
+            .toString();
+        final fullImageUrl = ApiConfig().resolveUrl(rawUrl).toString();
+        final extracted = (data['extracted_text'] ??
+                CapturedImageItem.ocrPendingText)
+            .toString();
+        final sec = (data['captured_at_second'] as num?)?.toInt() ?? seconds;
+        final isGlasses = (data['source'] == 'esp32_cam') ||
+            (type == 'glasses_snapshot') ||
+            snapId.contains('glasses');
+        final count = sessionCapturedImages.length + 1;
+        final itemTitle = (data['title'] ??
+                (isGlasses
+                    ? 'Glasses Capture #$count'
+                    : 'Board Capture #$count'))
+            .toString();
+
+        final newItem = CapturedImageItem(
+          id: DateTime.now().millisecondsSinceEpoch,
+          snapshotId: snapId,
+          title: itemTitle,
+          ocrText: extracted,
+          option: BoardImageOption.both,
+          capturedAtSecond: sec,
+          remoteImageUrl: fullImageUrl,
+          peopleDetected: (data['people_detected'] as num?)?.toInt() ?? 0,
+        );
+
+        setState(() {
+          if (isGlasses) {
+            isGlassesConnected = true;
+            glassesConnectionMode = 'Live Capture';
+          }
+          sessionCapturedImages.add(newItem);
+        });
+
+        // Watch background OCR worker for finished text
+        VisionService().watchOcr(snapId);
+      } else if (type == 'ocr_ready') {
+        // Background EasyOCR finished: update slide text live!
+        final snapId = (data['snapshot_id'] ?? '').toString();
+        final text = (data['extracted_text'] ?? '').toString().trim();
+        if (snapId.isNotEmpty && text.isNotEmpty) {
+          setState(() {
+            for (final item in sessionCapturedImages) {
+              if (item.snapshotId == snapId) {
+                item.ocrText = text;
+              }
+            }
+          });
+        }
       }
     });
   }
 
   @override
   void dispose() {
+    _glassesCheckTimer?.cancel();
     _liveTranscriptSub?.cancel();
     timer?.cancel();
     super.dispose();
@@ -324,11 +429,35 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     });
 
     try {
-      await AudioService().stopSession();
+      // mic off first, so nothing more is recorded while the user types the name
+      await AudioService().stopMicrophone();
 
       if (!mounted) return;
 
+      // noise scoring runs on stop, so the lecture name is asked now and used as
+      // the topic (empty / skipped = generic default topic)
+      final typedName = await _askLectureName();
+
+      await AudioService().stopSession(
+        title: typedName ?? _defaultSessionName(),
+        seminarTopic: typedName,
+      );
+
+      if (!mounted) return;
+
+      final finalTitle = typedName ?? _defaultSessionName();
+      // Auto-save session materials to Saved Inputs so they are never lost even if the user exits without tapping Save
+      DemoData.addSessionInput(
+        sessionId: currentSessionId,
+        title: finalTitle,
+        audioTranscripts: activeTranscripts,
+        capturedImages: sessionCapturedImages,
+        audioDuration: timeText,
+        allTranscriptLines: allTranscriptLineItems,
+      );
+
       setState(() {
+        sessionName = typedName;
         isRecording = false;
         isPaused = false;
         isAudioActionInProgress = false;
@@ -349,6 +478,69 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
       showMessage(context, 'Could not stop backend session: $error');
     }
+  }
+
+  String _defaultSessionName() =>
+      'Workshop Lecture ${DateTime.now().month}/${DateTime.now().day} - #${DemoData.nextInputId}';
+
+  /// Lecture name typed at stop time; null if left empty or skipped.
+  Future<String?> _askLectureName() async {
+    final controller = TextEditingController(text: sessionName ?? '');
+
+    final name = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.edit_note, color: primaryCol),
+            const SizedBox(width: 8),
+            const Text('Name this Lecture'),
+          ],
+        ),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Write the lecture topic. It becomes the session name and helps detect off-topic noise.',
+                style: TextStyle(fontSize: 14),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (v) => Navigator.pop(dialogContext, v),
+                decoration: const InputDecoration(
+                  labelText: 'Lecture Topic',
+                  hintText: 'e.g. Cooking methods',
+                  prefixIcon: Icon(Icons.topic_outlined),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, ''),
+            child: const Text('Skip'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+
+    controller.dispose();
+
+    final trimmed = name?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   void keepFlaggedLine(LectureTranscriptEntry entry) {
@@ -575,10 +767,11 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       if (!mounted) return;
     }
 
-    final defaultSessionName =
-        'Workshop Lecture ${DateTime.now().month}/${DateTime.now().day} - #${DemoData.nextInputId}';
+    final defaultSessionName = _defaultSessionName();
 
-    final nameController = TextEditingController(text: defaultSessionName);
+    // prefilled with the name typed at stop time, so it isn't typed twice
+    final nameController =
+        TextEditingController(text: sessionName ?? defaultSessionName);
 
     final shouldSave = await showDialog<bool>(
       context: context,
@@ -670,7 +863,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
       return;
     }
 
-    final sessionName = nameController.text.trim().isEmpty
+    final savedName = nameController.text.trim().isEmpty
         ? defaultSessionName
         : nameController.text.trim();
 
@@ -678,7 +871,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     DemoData.addSessionInput(
       sessionId: currentSessionId,
-      title: sessionName,
+      title: savedName,
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
       audioDuration: timeText,
@@ -693,7 +886,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     messenger?.showSnackBar(
       SnackBar(
-        content: Text('Session "$sessionName" saved in Saved Inputs.'),
+        content: Text('Session "$savedName" saved in Saved Inputs.'),
         action: SnackBarAction(
           label: 'View Inputs',
           onPressed: () {
@@ -753,25 +946,19 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
 
     final session = DemoData.addSessionInput(
       sessionId: currentSessionId,
-      title: 'Workshop Lecture Session #${DemoData.nextInputId}',
+      title: sessionName ?? 'Workshop Lecture Session #${DemoData.nextInputId}',
       audioTranscripts: activeTranscripts,
       capturedImages: sessionCapturedImages,
       audioDuration: timeText,
       allTranscriptLines: allTranscriptLineItems,
     );
 
-    final note = await DemoData.generateAiNotesForInput(session);
-
-    if (note != null && mounted) {
-      await showPostNoteGenerationRetentionDialog(
-        context: context,
-        session: session,
-        note: note,
-        onDone: () {
-          if (mounted) setState(() {});
-        },
-      );
-    }
+    if (!mounted) return;
+    // runs in the background (progress strip at the top); the Keep / Discard
+    // inputs dialog opens from the "Notes ready" snackbar
+    NotesJobs.instance.start(session, onChanged: () {
+      if (mounted) setState(() {});
+    });
   }
 
   // Builds a transcript line.
@@ -999,17 +1186,31 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     bool isDark,
     ThemeData theme,
   ) {
+    final isGlasses = img.title.contains('Glasses') ||
+        (img.snapshotId?.contains('glasses') == true);
+    final cardBorderColor = isGlasses
+        ? AppTheme.accentTeal.withValues(alpha: 0.5)
+        : primaryCol.withValues(alpha: 0.45);
+    final headerBgColor = isGlasses
+        ? AppTheme.accentTeal.withValues(alpha: 0.15)
+        : primaryCol.withValues(alpha: 0.12);
+    final badgeColor = isGlasses ? AppTheme.accentTeal : primaryCol;
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: primaryCol.withValues(alpha: 0.45),
+          color: cardBorderColor,
           width: 1.5,
         ),
         color: isDark
-            ? primaryCol.withValues(alpha: 0.06)
-            : primaryCol.withValues(alpha: 0.03),
+            ? (isGlasses
+                ? AppTheme.accentTeal.withValues(alpha: 0.05)
+                : primaryCol.withValues(alpha: 0.06))
+            : (isGlasses
+                ? AppTheme.accentTeal.withValues(alpha: 0.03)
+                : primaryCol.withValues(alpha: 0.03)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1017,14 +1218,18 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: primaryCol.withValues(alpha: 0.12),
+              color: headerBgColor,
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(10),
               ),
             ),
             child: Row(
               children: [
-                Icon(Icons.camera_alt_outlined, size: 15, color: primaryCol),
+                Icon(
+                  isGlasses ? Icons.visibility_outlined : Icons.camera_alt_outlined,
+                  size: 16,
+                  color: badgeColor,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -1032,7 +1237,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 12,
-                      color: primaryCol,
+                      color: badgeColor,
                     ),
                   ),
                 ),
@@ -1042,7 +1247,26 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: primaryCol.withValues(alpha: 0.2),
+                    color: badgeColor.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    isGlasses ? '🕶️ Glasses' : '📱 Camera',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: badgeColor,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -1050,7 +1274,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
-                      color: primaryCol,
+                      color: badgeColor,
                     ),
                   ),
                 ),
@@ -1078,16 +1302,61 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ),
                   ),
                 ],
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18, color: AppTheme.danger),
+                  tooltip: 'Remove from session',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  onPressed: () {
+                    setState(() => sessionCapturedImages.remove(img));
+                  },
+                ),
               ],
             ),
           ),
           Padding(
             padding: const EdgeInsets.all(10),
-            child: BoardPreviewWidget(item: img, compact: true),
+            child: BoardPreviewWidget(
+              item: img,
+              compact: true,
+              showOptionsSelector: true,
+              onOptionChanged: (newOpt) {
+                setState(() {
+                  img.option = newOpt;
+                });
+                if (img.snapshotId != null) {
+                  final prefStr = newOpt == BoardImageOption.ocr
+                      ? 'OCR_TEXT_ONLY'
+                      : (newOpt == BoardImageOption.imageAsIs
+                          ? 'IMAGE_ONLY'
+                          : 'BOTH');
+                  VisionService().updatePreference(img.snapshotId!, prefStr);
+                }
+              },
+            ),
           ),
         ],
       ),
     );
+  }
+
+  void _autoSaveIfUnsaved() {
+    if (sessionTranscriptEntries.isEmpty && sessionCapturedImages.isEmpty) return;
+    final sid = currentSessionId;
+    if (sid == null) return;
+    final alreadySaved = DemoData.savedInputs.any((s) => s.sessionId == sid);
+    if (!alreadySaved) {
+      final finalTitle = sessionName ?? _defaultSessionName();
+      DemoData.addSessionInput(
+        sessionId: sid,
+        title: finalTitle,
+        audioTranscripts: activeTranscripts,
+        capturedImages: sessionCapturedImages,
+        audioDuration: timeText,
+        allTranscriptLines: allTranscriptLineItems,
+      );
+    }
   }
 
   @override
@@ -1097,7 +1366,13 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
     final entries = displayedTranscriptEntries;
     final hasFlaggedLines = entries.any((e) => e.isFlagged);
 
-    return Scaffold(
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) return;
+        _autoSaveIfUnsaved();
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('Multi-Input Notes Studio'),
         actions: [
@@ -1310,7 +1585,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ),
                   ],
                   const SizedBox(height: 14),
-                  if (entries.isEmpty)
+                  if (entries.isEmpty && sessionCapturedImages.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 24),
                       child: Center(
@@ -1344,9 +1619,9 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                     ...() {
                       final List<Widget> transcriptWidgets = [];
 
-                      if (!isRecording &&
-                          seconds > 0 &&
-                          sessionCapturedImages.isNotEmpty) {
+                      // images sit inline at their capture time, also while
+                      // the lecture is still recording
+                      if (sessionCapturedImages.isNotEmpty) {
                         final Map<int, List<CapturedImageItem>> imgByIdx = {};
 
                         for (final img in sessionCapturedImages) {
@@ -1489,7 +1764,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                         ],
                       ),
                     )
-                  else if (!isRecording && seconds > 0)
+                  else
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -1518,82 +1793,84 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
                           ),
                         ],
                       ),
-                    )
-                  else
-                    ...sessionCapturedImages.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final img = entry.value;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHighest
-                              .withValues(alpha: 0.25),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: Theme.of(context).colorScheme.outlineVariant,
+                    ),
+                  const SizedBox(height: 10),
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: (isGlassesConnected ? AppTheme.accentTeal : Colors.amber)
+                          .withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: (isGlassesConnected ? AppTheme.accentTeal : Colors.amber)
+                            .withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          isGlassesConnected
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          color: isGlassesConnected
+                              ? AppTheme.accentTeal
+                              : Colors.amber.shade800,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isGlassesConnected
+                                    ? (glassesConnectionMode.isNotEmpty
+                                        ? 'AI Vision Glasses (ESP32-CAM) Connected • $glassesConnectionMode'
+                                        : 'AI Vision Glasses (ESP32-CAM) Connected')
+                                    : 'AI Vision Glasses (ESP32-CAM) Not Connected',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: isGlassesConnected
+                                      ? AppTheme.accentTeal
+                                      : Colors.amber.shade900,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                isGlassesConnected
+                                    ? 'Hardware ready. Press the push button on your glasses to capture slides in real-time.'
+                                    : 'Plug in via USB cable or connect ESP32-CAM to Wi-Fi. You can also use the mobile camera below.',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppTheme.mutedText,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    img.title,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                                Chip(
-                                  label: Text(
-                                    img.option.label,
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                  backgroundColor: primaryCol.withValues(
-                                    alpha: 0.15,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.close,
-                                    size: 18,
-                                    color: AppTheme.danger,
-                                  ),
-                                  tooltip: 'Remove from session',
-                                  onPressed: () {
-                                    setState(() {
-                                      sessionCapturedImages.removeAt(index);
-                                    });
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            BoardPreviewWidget(item: img, compact: true),
-                          ],
+                        IconButton(
+                          tooltip: 'Check Glasses Connection',
+                          icon: isCheckingGlasses
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.refresh, size: 18),
+                          onPressed: isCheckingGlasses ? null : _checkGlassesStatus,
                         ),
-                      );
-                    }),
-                  const SizedBox(height: 10),
+                      ],
+                    ),
+                  ),
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
                       onPressed: openCameraToCaptureImage,
                       icon: const Icon(Icons.camera_alt_outlined),
                       label: const Text(
-                        'Capture Board Image (With Side Transcripts & 3 Options)',
+                        'Take Photo from Phone / Upload Image File',
                       ),
                     ),
                   ),
@@ -1665,6 +1942,7 @@ class _AudioStudioScreenState extends State<AudioStudioScreen> {
           const SizedBox(height: 20),
         ],
       ),
+    ),
     );
   }
 }

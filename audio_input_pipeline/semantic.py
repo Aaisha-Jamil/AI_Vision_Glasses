@@ -72,7 +72,11 @@ def get_model():
             from sentence_transformers import SentenceTransformer
 
             log.info("loading sentence-transformers model %s...", MODEL_NAME)
-            _model = SentenceTransformer(MODEL_NAME, device="cpu")
+            try:
+                # cached copy first: skips ~7 s of HuggingFace online checks per start
+                _model = SentenceTransformer(MODEL_NAME, device="cpu", local_files_only=True)
+            except Exception:
+                _model = SentenceTransformer(MODEL_NAME, device="cpu")  # first run: download
             log.info("sentence-transformers model loaded")
     return _model
 

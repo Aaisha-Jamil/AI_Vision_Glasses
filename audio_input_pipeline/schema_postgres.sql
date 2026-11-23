@@ -121,6 +121,21 @@ CREATE TABLE IF NOT EXISTS generated_notes (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- App feedback (feedback/ routes). Written only by the backend, owner taken from the token.
+-- session_id / note_id have no foreign keys on purpose: feedback must survive the 7-day
+-- input purge and the 2-notes quota, and the app may refer to a session only it has.
+CREATE TABLE IF NOT EXISTS feedback (
+    feedback_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,                 -- Supabase Auth user id (from the access token)
+    session_id TEXT,
+    note_id TEXT,
+    rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    category TEXT NOT NULL,
+    comments TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback (user_id, created_at DESC);
+
 -- Supabase: block the public API keys (see the notes at the top).
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audio_chunks ENABLE ROW LEVEL SECURITY;
@@ -128,3 +143,4 @@ ALTER TABLE audio_containers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE image_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ocr_extractions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE generated_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE feedback ENABLE ROW LEVEL SECURITY;

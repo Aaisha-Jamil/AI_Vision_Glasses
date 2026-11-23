@@ -27,7 +27,8 @@ def get_easyocr_reader():
 def get_supabase_config():
     """Reads Supabase URL and Key from environment variables."""
     url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
+    # backend only: secret (service-role) key, not the public key RLS limits per user
+    key = (os.getenv("SUPABASE_SECRET_KEY", "") or os.getenv("SUPABASE_KEY", "")).strip()
     if "/rest" in url:
         url = url.split("/rest")[0]
     return url.rstrip('/'), key
@@ -56,7 +57,8 @@ def save_ocr_to_supabase(snapshot_id, session_id, extracted_text, confidence_sco
         "ocr_id": str(uuid.uuid4()),
         "snapshot_id": snapshot_id,
         "extracted_text": extracted_text,
-        "confidence_score": float(confidence_score)
+        "confidence_score": float(confidence_score),
+        "session_id": session_id,
     }
     
     try:

@@ -8,6 +8,15 @@ import 'package:record/record.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'api_config.dart';
+import 'auth_session_store.dart';
+
+/// [uri] with the signed-in user's token as ?token=... (WebSockets can't carry the
+/// Authorization header from every platform, so the backend reads it from the URL).
+Future<Uri> _withToken(Uri uri) async {
+  final token = await AuthSessionStore.readAccessToken();
+  if (token == null || token.isEmpty) return uri;
+  return uri.replace(queryParameters: {...uri.queryParameters, 'token': token});
+}
 
 class AudioService {
   static final AudioService _instance = AudioService._internal();
@@ -76,6 +85,25 @@ class AudioService {
   }
 
   // ---------------------------------------------------------
+  // SMART GLASSES (ESP32-CAM) STATUS
+  // ---------------------------------------------------------
+
+  Future<Map<String, dynamic>> checkGlassesStatus() async {
+    try {
+      final resp = await http
+          .get(_config.endpoint('/api/v1/glasses/status'))
+          .timeout(const Duration(seconds: 3));
+
+      if (resp.statusCode == 200) {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      }
+      return {'connected': false};
+    } catch (_) {
+      return {'connected': false};
+    }
+  }
+
+  // ---------------------------------------------------------
   // START SESSION
   // ---------------------------------------------------------
 
@@ -103,17 +131,20 @@ class AudioService {
       final resp = await http
           .post(
             _config.endpoint('/api/v1/session/start'),
-            headers: {
+            headers: await AuthSessionStore.authHeaders({
               'Content-Type': 'application/json',
-            },
+            }),
             body: jsonEncode({
               'title': title,
-              'seminar_topic': seminarTopic ??
-                  'Computer Science, AI & Machine Learning Lecture',
+              // no topic -> the backend's generic default (the user names the
+              // lecture at stop time, see stopSession)
+              if (seminarTopic != null && seminarTopic.trim().isNotEmpty)
+                'seminar_topic': seminarTopic.trim(),
               'source': source,
             }),
           )
-          .timeout(const Duration(seconds: 15));
+          // the first session after the server starts waits for the embedding model
+          .timeout(const Duration(seconds: 90));
 
       if (resp.statusCode != 200) {
         throw Exception(
@@ -133,7 +164,7 @@ class AudioService {
         await _startMicrophoneStream();
       }
 
-      connectLiveTranscript();
+      await connectLiveTranscript();
 
       return data;
     } catch (e) {
@@ -142,7 +173,8 @@ class AudioService {
       if (backendStarted) {
         try {
           await http
-              .post(_config.endpoint('/api/v1/session/stop'))
+              .post(_config.endpoint('/api/v1/session/stop'),
+                  headers: await AuthSessionStore.authHeaders())
               .timeout(const Duration(seconds: 5));
         } catch (_) {}
       }
@@ -159,9 +191,9 @@ class AudioService {
   Future<void> _startMicrophoneStream() async {
     final httpUri = _config.endpoint('/ws/audio');
 
-    final wsUri = httpUri.replace(
+    final wsUri = await _withToken(httpUri.replace(
       scheme: httpUri.scheme == 'https' ? 'wss' : 'ws',
-    );
+    ));
 
     _audioChannel = WebSocketChannel.connect(wsUri);
 
@@ -239,18 +271,33 @@ class AudioService {
   // STOP SESSION
   // ---------------------------------------------------------
 
-  Future<Map<String, dynamic>> stopSession() async {
+  /// Stops the mic only (the backend session stays open), so no more audio is
+  /// recorded while the user types the lecture name before [stopSession].
+  Future<void> stopMicrophone() => _cleanupAudio();
+
+  /// [title] becomes the session title; [seminarTopic] (the lecture name the user
+  /// typed) is used by noise scoring, which runs on stop. Null = keep the start values.
+  Future<Map<String, dynamic>> stopSession({
+    String? title,
+    String? seminarTopic,
+  }) async {
     try {
       await _cleanupAudio();
 
       final resp = await http
           .post(
             _config.endpoint('/api/v1/session/stop'),
-            headers: {
+            headers: await AuthSessionStore.authHeaders({
               'Content-Type': 'application/json',
-            },
+            }),
+            body: jsonEncode({
+              if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
+              if (seminarTopic != null && seminarTopic.trim().isNotEmpty)
+                'seminar_topic': seminarTopic.trim(),
+            }),
           )
-          .timeout(const Duration(seconds: 15));
+          // scoring runs on stop (embeddings + maybe one LLM session check)
+          .timeout(const Duration(seconds: 45));
 
       if (resp.statusCode != 200) {
         throw Exception(
@@ -301,11 +348,12 @@ class AudioService {
   // LIVE TRANSCRIPT WEBSOCKET
   // ---------------------------------------------------------
 
-  void connectLiveTranscript() {
+  Future<void> connectLiveTranscript() async {
     disconnectLiveTranscript();
 
     try {
-      final uri = _config.wsTranscriptUri;
+      // without the token the server closes the socket (it only sends a user's own events)
+      final uri = await _withToken(_config.wsTranscriptUri);
 
       _wsChannel = WebSocketChannel.connect(uri);
       _isWsConnected = true;
@@ -356,9 +404,9 @@ class AudioService {
       final resp = await http
           .patch(
             _config.endpoint('/api/v1/chunk/$chunkId/override'),
-            headers: {
+            headers: await AuthSessionStore.authHeaders({
               'Content-Type': 'application/json',
-            },
+            }),
             body: jsonEncode({
               'status': status,
             }),
@@ -383,9 +431,9 @@ class AudioService {
       final resp = await http
           .patch(
             _config.endpoint('/api/v1/chunk/$chunkId/text'),
-            headers: {
+            headers: await AuthSessionStore.authHeaders({
               'Content-Type': 'application/json',
-            },
+            }),
             body: jsonEncode({
               'text': text,
             }),

@@ -9,6 +9,7 @@ class AppTheme {
   static const Color warmCream = Color(0xFFF3E7D3); // #F3E7D3 (Warm Cream Parchment)
   static const Color warmSand = Color(0xFFD6C3A3); // #D6C3A3 (Warm Sand / Almond Tan)
   static const Color deepForest = Color(0xFF2E5E55); // #2E5E55 (Deep Forest Slate / Pine Teal)
+  static const Color accentTeal = Color(0xFF3B8A7E); // #3B8A7E (AI Vision Glasses Accent)
 
   // Backwards-compatible semantic aliases
   static const Color seaBlue = deepForest;
